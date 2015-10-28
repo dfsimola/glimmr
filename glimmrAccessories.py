@@ -1219,5 +1219,37 @@ def kernelsmoothweights(A, w=5, n=1, kernel='normal', weights=None, naconvert=No
 	return A
 
 
+def factit(x):
+	"""Iterative implementation of factorial function."""
+	
+	if x <= 1: return 1
+	
+	a = [0 for i in range(x+1)]
+	a[0] = 1; a[1] = 1
+	for i in range(2,x+1): a[i] = i*a[i-1]
+	return a[x]
+
+fact = lambda x: factit(x)
+# def fact(x): return factit(x)
+
+factorial = lambda x: factit(x)
+
+
+nchoosek = lambda n,k: factorial(n)/float(factorial(k)*factorial(n-k))
+# nchoosek = lambda n,k: factit(n)/float(factit(k)*factit(n-k))
+binomialCoefficient = nchoosek
+bincoef = nchoosek
+
+def binomial(n,x,p, approx=False):
+	"""Returns the binomial probability of x successes in n trials"""
+	
+	if approx:
+		# Normal(np, np(1-p))
+		import maths
+		return maths.GaussianPDF(x, n*p, n*p*(1-p))
+	
+	c = factorial(n)/float(factorial(x)*factorial(n-x))
+	return c*(p**x)*((1-p)**(n-x))
+
 
 
