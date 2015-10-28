@@ -323,7 +323,7 @@ while ai < len(args):
 	except IndexError: val = ''
 	
 	if re.match('in|^i$', arg): indirfile = val; nhelps += 1
-	elif re.match('out|^o$', arg): outdir = ut.slash(val)
+	elif re.match('out|^o$', arg): outdir = slash(val)
 	elif arg == 'ref': reffile = val
 	elif arg == 'scaffold': chrom = val
 	elif arg == 'gold': goldfile = val
