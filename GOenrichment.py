@@ -305,7 +305,7 @@ def batchFisherExactTest(dat,tails=2,alpha=0.05, outdir='/var/tmp/'):
 
 
 #
-def antGOenrichment(names, notnames=[], gofile='cflo.v3.3.UniProt.GO.txt', dirfile='/Users/simola/Documents/UPenn/BergerLab/data/', verbose=False, splitnames=False):
+def antGOenrichment(names, notnames=[], gofile='cflo.v3.3.UniProt.GO.txt', dirfile='./', verbose=False, splitnames=False):
 	print '\nnum query genes', len(names), names[:5]
 	# first parse the GO table into a dictionary of GO terms returning genes for each
 	dct = {}
@@ -797,8 +797,6 @@ if method != 'BH' and method != 'Bonferroni': sys.exit('Error: method must be on
 # I/O WORK
 # -------------------------------------------------------------------
 createdir(outdir)
-
-os.chdir('/Users/simola/Documents/UPenn/BergerLab/data/')
 
 # DO WORK
 # -------------------------------------------------------------------
