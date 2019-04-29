@@ -42,26 +42,6 @@ def makeDict(mylist,value=None):
 
 makeDictFromPairs = lambda mylist: dict(map(lambda x: (x[0],x[1]), mylist))
 
-def makeHist(mylist, asDict=False):
-	"""Count up instances of each entry"""
-	
-	dct = {}
-	for itm in mylist:
-		try:
-			dct[itm] += 1
-		except KeyError:
-			dct[itm] = 1
-	
-	# add percentage
-	total = sum(dct.values())
-	for k in dct.keys():
-		dct[k] = [dct[k], dct[k]/float(total)]
-	
-	if asDict: return dct
-	return [[k]+dct[k] for k in sorted(dct.keys())]
-	
-
-
 # parts of a filename
 getLabel = lambda astr: '.'.join(astr.split('/')[-1].split('.')[:-1])
 getFilename = lambda astr: astr.split('/')[-1]
@@ -503,12 +483,12 @@ def printList(lst, title="", delim="\n", pipe=sys.stdout, file='', sort=False, n
 		lst = [title]+lst#print >> pipe, title
 	for i in range(len(lst)):
 		if i == len(lst)-1:
-			if newline: print >> pipe, str(lst[i])
+			if newline: print(str(lst[i]), file=pipe)
 			else: 
-				print >> pipe, str(lst[i])
+				print(str(lst[i]), file=pipe)
 				# print 'test "%s"'%(lst[i])
 		else:
-			print >> pipe, str(lst[i])+delim,
+			print(str(lst[i])+delim, file=pipe, end='')
 	# if newline: print >> pipe, newline,
 	if file: pipe.close()
 
@@ -914,7 +894,7 @@ def floatnastr(x,na=nastr):
 	return y
 
 def floatnacrap(x,na=nastr):
-	if x == 'nan' or x == '-nan': return na
+	if x == 'nan': return na
 	y = na
 	try: y = float(x)
 	except ValueError: return na

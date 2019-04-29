@@ -27,6 +27,7 @@ indirfile = ''
 outdir = ''
 DRYRUN = False
 refGenomeFile = None
+nthreads = 1
 
 # CLI ARGS
 # -------------------------------------------------------------------
@@ -55,6 +56,7 @@ while ai < len(args):
 	if re.match('in|^i$', arg): indirfile = val; nhelps += 1
 	elif re.match('out|^o$', arg): outdir = slash(val)
 	elif arg == 'r' or arg == 'ref': refGenomeFile = val
+	elif arg == 'x': nthreads = int(val)
 	elif arg == 'dryrun': DRYRUN = True; ai-=1
 	
 	elif re.match('^help|h$', arg.lower()): sys.exit(help)
@@ -131,7 +133,7 @@ for f in files:
 	
 	# sort it
 	print 'Sorting shuffled likelihood file...'
-	call = 'sort -k 1,1 -k 2,2n "%s" > "%s"'%(newf,newfsort)
+	call = 'sort -k 1,1 -k 2,2n -S 50%'+' --parallel=%s "%s" > "%s"'%(nthreads, newf,newfsort)
 	print 'Call:', call
 	os.system(call)
 	os.system('rm "%s"'%(newf))

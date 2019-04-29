@@ -3,17 +3,21 @@
 # brief methods for allele specific mapping
 # given reference genome with assumed heterozygous characters (iupac), glimmr will first map reads that do not overlap the iupac sites. then glimmr will generate 2 reference genomes disambiguating the heterozygous sites into one of two files randomly, and map remaining reads to each of these haploid references allowing missing characters. the three map files will then be merged, assuring that, in the case of multiple valid alignments of the same read to the same exact position in the genome, the best alignment is chosen using bowtie2's alignment score (AS:i:<N>).
 
-import os, re, sys, math, time, stat, time, random, subprocess, decimal
-from operator import add,mul
-from string import *
-from glimmrAccessories import *
 
-version = """\nglimmrHet.py, version %s
+GLIMMR_VERSION = 1.8
 
- GlimmrHet: genomic locus identification using multiply maped reads and a diploid (heterozygous) reference genome
+# Version info
+# - added ability to map to a heterozygous genome natively or produce allele specific maps for SE or PE data
+# - fixed between sample coverage normalization, correcting effective coverage of translikelihoods
+# changed default buffersize to reduce disk access
+# - added new runtime flags:
+#	- --standard [new default]: --lambda 1 --d 1
+#	- --complete: --lambda 0.67 --d 10
+# - hugly "/path/to/ref/chroms/*.fa": calls --rest chr1,chr2,...,chrN while specifying only the appropriate chrom.fa file to load into memory (only works with --d 1)
+
+"""GlimmrHet: genomic locus identification using multiply maped reads and a diploid (heterozygous) reference genome
  
- Requires Unix/Mac OS X/CYGWIN with Python 2.5+, bowtie v1 or v2 
- (preferably 64-bit for memory allocation > 4GB)
+ Version: %s
  
  Daniel F. Simola, PhD (simola@upenn.edu)
  Laboratory of Shelley L. Berger, PhD
@@ -21,180 +25,21 @@ version = """\nglimmrHet.py, version %s
  October 2015
  
  Copyright (c) 2015, Daniel F. Simola and Shelley L. Berger, University of
- Pennsylvania. You may not use this file except in compliance with the terms of our
- License, GNU GENERAL PUBLIC LICENSE v3.0, a copy of which is located in the LICENSE file.
-"""%(GLIMMR_VERSION)
-
-"""%s"""%(version)
-
-help = """
-glimmrHet.py v%s
-
-Full help menu: glimmrHet.py --help/-h
-Description and requirements: glimmrHet.py --version/-v
-
-Usage: glimmrHet.py -m mapfile.txt [-o <OUTDIR> -name <RESULTS_DIR>] [-a -O -index -lik -post] [options]
-
-Primary arguments
-=================
-     -m <STR>     map file (see below for format)
-
-       -a/-ra     (re)align reads (generate sam-format read maps with bowtie2)
-       -O/-rO     (re)organize read maps into unique and degenerate files: 
-       -index     sorts and indexes the read map files
-  -lik/-relik     (re)compute likelihood probability files
--post/-repost     (re)compute posterior probability files from likelihoods
-     -o <STR>     directory in which to save results 
-                  (default: current working directory ./)
-  -name <STR>     name of the output/results directory 
-                  (default: glimmr_results)
-
-     -d <INT>     maximum number of alignments per read (default: 10)
-     -e <INT>     global sequencing error rate (specified as phred value; 
-                  e.g., Q=30 == P<0.001) (default: 35)
-   -l <FLOAT>     reweight the likelihood model towards read-specific or 
-                  global binomial probability (default: 0.67 towards binomial)
-
-  -rest <STR>     restrict analysis to a subset of reference genome (delimited by '.')
-                  e.g., -rest chr1.chr2,chr3 or -rest <file.txt> (see more below)
-
-     -x <INT>     distribute jobs over <INT> processes on 1 machine (multi-core)
-                  functions for -a -lik and -post
--buffer <INT>     specify memory footprint (how much of the read map to preload into memory)
-                  (default: 100 [MB])
-   -ids <STR>     restrict genotyping to a subset of SampleIDs in map file (comma delimited)
-
+ Pennsylvania.  All Rights Reserved.
  
-Other arguments
-===============
-   -aligntool     read mapping aligner (default: bowtie2)
-     -fd/-rfd     identify PCR clonal duplicates (runs by default with -O)
-     -r <STR>     reference genome (fasta format); typically specified in map file
--keepbowtie/-kb   do not delete the original bowtie SAM file following 
-                  read organization
-
-       -python    specify full path to python shell (default: 'python')
-       -glpath    specify full path to glimmrLiklihood file (default: 'glimmrLiklihoodHey.py')
-  -bowtie/-btd    specify the base directory of your bowtie installation 
-                  e.g., -btd /usr/bin/bowtie-0.12.5) (default: '')
-
-     -i <STR>     directory to find pre-existing map file(s)
-    -splitmap     separate single-end and paired-end reads into different map files
-        -link     if you only have a unique map, this links to that file 
-                  directly rather than organizing new files
-         -exO     organize a pre-existing read map into the 4 files above 
-                  (Default: sampleID.sam, where sampleID is in mapfile)
-
-
-Managing multi-threading (for -lik)
-===================================
-      -bychrom    distribute jobs separately for each scaffold/chrom [default: ON]
-                  NB, --byid --bychrom can be combined for ultra high throughput
-         -byid    distribute jobs for all scaffolds/chroms by SampleID    
-   -groupchrom    group multiple chromosomes into a single job (default for -x 1)
-     -subchrom    split each chromosome into -x jobs
-
-
-Read map indexing
-=================
-EX: glimmrHet.py -m <map_file.txt> -r <reference_genome.fasta> --index
-
-Arguments:
-        -index    sorts and indexes the unique SE and PE map files
-      -reindex    replaces an existing index
- -(re)indexuni    index unique maps only
- -(re)indexdeg    index degenerate maps only
-       -nosort    index only, assuming map files are already sorted
-
-
-Restricting analysis to sub regions of genome
-=============================================
-         -rest  Specify a region or file containing a list of regions over 
-                which to perform genotyping (default: none)
-                EX: "--rest chr1"; genotype the entirety of chr1 only
-                EX: "--rest chr1.chr5"; genotype chrom1 and chr5 only
-                EX: "--rest chr1,0,1000"; genotype positions 0 to 1000 
-                    of chr1, inclusive
-                EX: "--rest chr1,0,1000,-"; genotype all of chr1 excluding 
-                    positions 0 to 1000
-                A restriction file should be a tab-delimited list of one or 
-                more regions similarly described, replacing commas with tabs.
-                Execute this shell command to generate one:
-                echo -e "chrom1\\nchrom2\\nchrom3" > myrest.txt, or
-                echo -e "chrom1\\t0\\t1000\\nchrom5\\t500\\t50000" > myrest.txt
-
-
-Other notable arguments
-=======================
-  --mindepth <INT>: minimum number of reads to evaluate a nucleotide locus
-  --maxdepth <INT>: maximum number of reads to evaluate a nucleotide locus.
-                    If > <INT> reads only the first <INT> will be used.
-  --fasta:       read files do not contain quality scores
-  --qual33:      quality scores follow a phred 33 scale instead of default 
-                 phred 64 scale
-  --peonly:      only use paired end reads for SNP identification
-  --all:         use all reads for mapping (based on --policy bestm with 
-                 maximum of d alignments)
-  --uniq:        only use uniquely mapping reads for SNP identification. Also
-                 if provided with -a for mapping
-                 only return an alignment if it is unique in the reference 
-                 genome given specified maximum mismatches
-                 bowtie arguments: '-v mismatches -a -m 1 --best
-  --best:        generate a best-guess read map, returning an alignment if it
-                 is the one with the fewest mismatches
-                 given specified maximum mismatches
-                 bowtie arguments: '-v mismatches -k 1 --best'
-  --bestno:      similar to --best but discard reads which have multiple 
-                 equally best alignments
-  --mapqual      use read quality values during mapping (bowtie -n mode with
-                 default parameters)
-  --colorspace:  input files are in ABI SOLiD colorspace format 
-                 (suffix .csfasta and .qual)
-                 NB, currently only works with single-end reads
-  --ins <FLOAT>: estimate insert size range for paired-end reads as the 
-                 <FLOAT> percentile of the empirical distribution 
-                 (default: 0.99) (see below for more details)
-  --qual-int:    sets the --integer-quals flag in bowtie
-  --suffix <STR>:    Change default map file suffix to FILENAME.<STR> [Default: sam]
-
-
-Map file format
-===============
-The map file is a standard tab-delimited text file indicating how each raw 
-sequence reads file should be processed by sniper. The format is organized as 
-one row per sequenced lane and requires 11 columns of information row.
-
-(If you copy/paste this, make sure to convert spaces to tabs.)
-
-
-# Any comments about this experiment are preceded by hash
-
-#! Run Lane        SampleID       Alias RefGenome        Diploid Paired Path            Prior ReadLength Diameter
-   1   unique_id   IMR90.PolII.b1 tf    /path/ref_genome 0       0      /path/to/fastq/ 0.01  75         125
-   2   unique_id2  IMR90.PolII.b2 tf    /path/ref_genome 0       0      /path/to/fastq/ 0.01  75         125
-   3   unique_id3  IMR90.input.b1 inp   /path/ref_genome 0       0      /path/to/fastq/ 0.5   75         125
-
-# Multiple posteriors can be specified below
-#@ posterior
-IMR90.PolII.b1	IMR90.input.b1
-IMR90.PolII.b2	IMR90.input.b1
-
-
-       Run: e.g. flowcell ID
-      Lane: unique identifier pointing to a specific fastq file (e.g., a barcode after demultiplexing)
-     Alias: one of: inp, nuc/tf, ptm
- RefGenome: basename only (e.g., /path/to/hg19 not /path/to/hg19.fasta)  
-   Diploid: perform read mapping to diploid reference genome (0/1)
-    Paired: reads are paired end
-      Path: directory containing fastq file
-     Prior: Prior probability of this sample binding for posterior calculation
-ReadLength: read length (bp) in fastq file
-  Diameter: fragment size, minus adapter length (e.g., estimated from BioA)
-
-Additional user-specified fields may be added to the map file after the required columns 
-(e.g. concentration, date sequenced, author, etc.).
+ You may not use this file except in compliance with the terms of our
+ License. You may obtain a copy of the License at XXX
+ 
+ Unless required by applicable law or agreed to in writing, this
+ software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+ CONDITIONS OF ANY KIND, either express or implied.  See the License
+ for the specific language governing permissions and limitations
+ under the License.
 """%(GLIMMR_VERSION)
 
+import os, re, sys, math, time, stat, time, random, subprocess, decimal
+from operator import add,mul
+from string import *
 
 # GLOBAL VARIABLES AND FUNCTIONS
 # -----------------------------------------------------------------
@@ -203,10 +48,14 @@ multichromtoken = '.'         # separator for --rest <chr1.chr2.....chrn> separa
 nastr = '"NA"'                # represents missing value
 infy = decimal.Decimal('inf') # 
 defaultprec = 25              # 28 is the default for the class
-bufferlimit = 10000           # number of lines to buffer in memory (100MB)
+bufferlimit = 10000          # number of lines to buffer in memory (10MB)
 PCR_HASH_WIDTH = 5
 PCR_HASH_NMAX = 5-1
 
+getLabel = lambda astr: '.'.join(astr.split('/')[-1].split('.')[:-1])
+getFile = lambda astr: astr.split('/')[-1]
+getPath = lambda astr: '/'.join(astr.split('/')[:-1])+'/'
+getSuffix = lambda astr: astr.split('/')[-1].split('.')[-1]
 
 all_jobs = []
 
@@ -256,6 +105,35 @@ def launchProcesses(jobs, nsubprocs=1, sleep=1):
 		# print 'tet', nlaunched
 	for job in running_jobs: job.wait() # halt code until all jobs are finished.
 	return 1
+
+def mergeSamFiles(lst,outfile,header=False):
+	for x in lst:
+		assert os.access(x, os.F_OK), 'Cannot access %s'%(x)
+	
+	f1 = lst.pop(0)
+	# assume first file has desired sam header
+	if header==True:
+		os.system('cp "%s" "%s"'%(f1,outfile))
+	else:
+		fho = open(outfile,'a')
+		fh = open(f1, 'r')
+		for line in fh:
+			if line[0] != '@': print >> fho, line,
+		fh.close()
+		fho.close()
+		
+	# read subsequent lst files and concatenate non-header lines to outfile
+	fho = open(outfile,'a')
+	for l in lst:
+		fh = open(l, 'r')
+		for line in fh:
+			if line[0] != '@': print >> fho, line,
+		fh.close()
+	fho.close()
+	
+
+def getFilename(astr):
+	return astr.split('/')[-1]
 
 def indexFile(fn, outfile):
 	"Records number of bytes into file for first row of each chromosome"
@@ -365,7 +243,7 @@ def indexDegFile(infile, outbase, filterids={}):
 	
 	# sort the index files spatially
 	pipeit('sorting...')
-	os.system('sort -k 1,1 -k 2,2n -S 50%'+' "%s" > "%s"'%('%s.index.unsort'%(infile), '%s.index'%(infile)))
+	os.system('sort -k 1,1 -k 2,2n -S 50%'+' --parallel=%s "%s" > "%s"'%(nsubprocs, '%s.index.unsort'%(infile), '%s.index'%(infile)))
 	os.system('rm -f "%s"'%('%s.index.unsort'%(infile)))
 	
 	# create a meta-index file that stores the starting bytes for each chromosome
@@ -505,7 +383,7 @@ def indexDegFileParts(infile, outbase, filterids={}, bufsize=5000000):
 	# sort the index files by position and concatenate to final index file in sorted order
 	pipeit('sorting...')
 	for chrom in sorted(IH.keys()):
-		if os.access(IH[chrom], os.F_OK): os.system('sort -k 1,1 -k 2,2n -S 50% "%s" >> "%s"'%(IH[chrom], finalindex))
+		if os.access(IH[chrom], os.F_OK): os.system('sort -k 1,1 -k 2,2n -S 50% --parallel=%s "%s" >> "%s"'%(nsubprocs, IH[chrom], finalindex))
 	os.system('rm -rf "%s"'%(outdir))
 	
 	# create a meta-index file that stores the starting bytes for each chromosome
@@ -611,13 +489,78 @@ def loadPCRduplicates(filename):
 		lh = open(filename)
 		[loadIntoHash(*line[:-1].split('\t')[:2]) for line in lh]
 		lh.close()
-	except IOError: pipeit('Warning: Cannot access PCR dup file %s'%(filename),1)
+	except ImportError: pipeit('Warning: Cannot access PCR dup file %s'%(filename),1)
 	return D
+
 
 
 def pipeit(s, nl=0, pipe=sys.stdout):
 	pipe.write(s+(nl>0 and ''.join(['\n' for z in xrange(nl)]) or '')); sys.stdout.flush()
 	
+	
+
+def isnan(x):
+    return str(x) == str(1e400*0)
+
+
+def maxlenval(tup):
+	mlv = 0
+	for i in tup:
+		x = len(str(i))
+		if x>mlv:mlv = x
+	return mlv
+
+def fixspacing(item,nsp):
+	v = str(item)
+	if len(v) == nsp: return v
+	delt = nsp-len(v)
+	if delt < 0:
+		v = v[0:nsp]
+	else:
+		for i in range(delt): v+=' '
+	return v
+
+def transpose(mat):
+	"""Given a 2d array of arrays, will invert the dimensions."""
+	newm = []
+	for c in range(len(mat[0])):
+		newrow = []
+		for r in range(len(mat)):
+			newrow.append(mat[r][c])
+		newm.append(newrow)
+	return newm
+
+
+fixNull = lambda nastr: lambda x: x=='' and nastr or x
+def flatten(sequence):
+	def rflat(seq2):
+		seq = []
+		for entry in seq2:
+			if seqin([entry]):
+				seq.extend([i for i in entry])
+			else:
+				seq.append(entry)
+		return seq
+	
+	def seqin(sequence):
+		for i in sequence:
+			## all sequences have '__contains__' in their dir()
+			## parentheses present to aid commenting mid-condition
+			if ('__contains__' in dir(i) and type(i) != str and type(i) != dict):
+				return True
+		return False
+	
+	seq = [sequence][:] # in case parameter isn't already a sequence
+	while seqin(seq): seq = rflat(seq)
+	return seq
+
+
+def createdir(dirname):
+	if not dirname: return 0
+	if not os.access(dirname, os.F_OK):
+		try: os.mkdir(dirname); return 1
+		except OSError: pass
+	return 0
 
 def record(astr, filename, ioMethod='a'):
 	if ioMethod == 'a':
@@ -628,6 +571,685 @@ def record(astr, filename, ioMethod='a'):
 	pmrfh.close()
 	
 	return 1
+
+
+def trimComments(dat):
+	# parse comments
+	ndat = []
+	for line in dat:
+		# only care about non commented lines
+		if not re.match('(^\s*#.*$)|(^\s$)', line):
+			# parse any commentary on this line
+			cleanme = re.split('^(.*)#.*$', line)
+			if len(cleanme) > 1: cleanme.pop(0)
+			ndat.append(cleanme[0].strip('\n'))
+	return ndat
+
+def getFiles(indirfile, include=[], exclude=[]):
+	if type(include)!=type(list()): include = [include]
+	if type(exclude)!=type(list()): exclude = [exclude]
+	return getContents(indirfile, typ='files', include=include, exclude=exclude)
+
+def getDirectories(indirfile, include=[], exclude=[]):
+	if type(include)!=type(list()): include = [include]
+	if type(exclude)!=type(list()): exclude = [exclude]
+	files = getContents(indirfile, typ='dirs', include=include, exclude=exclude)
+	return map(slash, files)
+
+def getContents(indirfile, typ='all', include=[], exclude=[]):
+	if type(include)!=type(list()): include = [include]
+	if type(exclude)!=type(list()): exclude = [exclude]
+	keepfiles = []
+	if len(include) == 0: include = ['']
+	try:
+		mode = os.stat(indirfile)[stat.ST_MODE]
+		INISADIR = False
+		if stat.S_ISDIR(mode):
+			INISADIR = True
+			indirfile = slash(indirfile)
+		files = []
+		if INISADIR and os.access(indirfile, os.F_OK):
+			for f in os.listdir(indirfile):
+				# print indirfile, 'vs', f
+				# if f[0] != '.' and f[0] != '~' and f[len(f)-3:len(f)] not in exclude:
+				if f[0] != '.' and f[0] != '~':
+					# do includes
+					for item in include:
+						# fix oddities in item
+						item = item.replace('+','\+')
+						
+						# print 'TEST', item,'vs',f
+						if re.match('.*%s.*'%(item), f):
+							# confirm not a directory
+							mode = os.stat(indirfile+f)[stat.ST_MODE]
+							if typ=='all': 
+								if stat.S_ISDIR(mode): files.append(indirfile+f)
+								else: files.append(indirfile+f)
+							elif typ=='files' and not stat.S_ISDIR(mode):
+								files.append(indirfile+f)
+							elif typ=='dirs' and stat.S_ISDIR(mode):
+								files.append(indirfile+f)
+							# else: print indirfile+f, 'is a directory'
+						# else: print 'no match', item,'vs',f,re.match('.*%s.*'%(item), f)
+				# else:
+					# print 'ODDITY', f
+					
+			for f in files:
+				inexclude = False
+				for item in exclude:
+					if re.match('.*%s.*'%(item), f): inexclude = True
+				if inexclude == False:
+					# confirm not a directory
+					keepfiles.append(f)
+					
+					# try:
+					# 	print 'testing', indirfile+f
+					# 	mode = os.stat(indirfile+f)[stat.ST_MODE]
+					# 	print 'mode', mode
+					# except OSError:
+					# 	print 'why?'
+					# if typ=='all': 
+					# 	if stat.S_ISDIR(mode): keepfiles.append(indirfile+f+'/')
+					# 	else: keepfiles.append(indirfile+f)
+					# elif typ=='files' and not stat.S_ISDIR(mode):
+					# 	keepfiles.append(indirfile+f)
+					# elif typ=='dirs' and stat.S_ISDIR(mode):
+					# 	print 'got a dir'
+					# 	keepfiles.append(indirfile+f+'/')
+					# else:
+					# 	print 'failure', stat.S_ISDIR(mode)
+		elif not INISADIR: keepfiles.append(indirfile)
+		else: sys.exit('cannot access dir '+indirfile)
+	except OSError: pass
+	return keepfiles
+
+# def readList(fname, header=False):
+# 	crap,thelist,crap = readTable(fname, header=header)
+# 	return flatten(thelist)
+def readList(fname, dtype=None, delim='\n'):
+	fh = open(fname)
+	lst = None
+	if dtype: lst = map(lambda x: dtype(x[:-1]), fh)
+	else: lst = map(lambda x: x[:-1], fh)
+	fh.close()
+	if delim != '\n': return lst[0].split(delim)
+	return lst
+
+def printList(lst, title="", delim="\n", pipe=sys.stdout, file='', sort=False, newline='\n', ioMethod='w'):
+	if file: pipe = open(file,ioMethod)
+	if sort: lst.sort()
+	if title: 
+		lst = [title]+lst#print >> pipe, title
+	for i in range(len(lst)):
+		if i == len(lst)-1:
+			print >> pipe, str(lst[i]),
+		else:
+			print >> pipe, str(lst[i])+delim,
+	if newline: print >> pipe, newline,
+	if file: pipe.close()
+
+def readTable(filename, header=True, rownames=True, delim="\t", comments=True, keepKey=False):
+	fh = open(filename)
+	table = fh.readlines()
+	fh.close()
+	if comments: table = trimComments(table)
+	
+	tabHeader = []; rowIDs = []; data = []
+	if header: 
+		tabHeader = table.pop(0).strip('\n').split(delim)
+		if not keepKey: tabHeader.pop(0)
+		# else: tabHeader = table.pop(0).strip('\n').split(delim)
+	for line in table:
+		sline = line.strip('\n').split(delim)
+		if rownames:
+			rowIDs.append(sline.pop(0))
+		data += [sline]
+	return data, rowIDs, tabHeader
+
+def printTable(tab, header=[], rows=[], delim="\t", newline='\n', file='', pipe=sys.stdout, ioMethod='w'):
+	
+	if file: pipe = open(file,ioMethod)
+	
+	if header:
+		printList(header, delim=delim, pipe=pipe, newline=newline)
+	if len(rows):
+		assert len(rows) == len(tab), "Rows and tab must have same length."
+		for ri in range(len(tab)):
+			r = [rows[ri]]+tab[ri]
+			printList(r, delim=delim, pipe=pipe, newline=newline)
+	else:
+		for r in tab:
+			printList(r, delim=delim, pipe=pipe, newline=newline)
+	
+	if file: pipe.close()
+
+def printFormattedTable(tab, header=[], rows=[], delim=" ", newline='\n', file='', pipe=sys.stdout, nastr='"NA"', ioMethod='w', colSpacing=[]):
+	"""not good for tables > say 100 MB"""
+	if file: pipe = open(file,ioMethod)
+	if tab == [] and file: pipe.close(); return
+	tab2 = tab[:]
+	if rows:
+		for i in range(len(tab)): tab2[i] = [rows[i]]+tab[i]
+	
+	# need to determine for each column the max length value and space to that
+	collens = colSpacing[:]
+	if not len(collens):
+		# print 'printformattedtable: fixing col spacing'
+		temp = transpose(tab2)
+		if len(header):
+			for i in range(len(temp)):
+				r = temp[i]
+				r.append(header[i])
+				collens.append(maxlenval(r))
+		else:
+			for r in temp: collens.append(maxlenval(r))
+	
+	# now create a new tuple with proper spacing
+	temp = []; sheadings = []
+	if len(header):
+		for i in range(len(header)):
+			sheadings.append(fixspacing(header[i],collens[i]))
+	
+	for row in tab2:
+		newrow = []
+		for i in range(len(row)):
+			val = row[i]==nastr and '.' or row[i]
+			#if val==nastr: val = '.' # SAS missing value
+			newrow.append(fixspacing(val,collens[i]))
+		temp.append(newrow)
+		
+	# pipe = open(file,ioMethod)
+	printTable(temp,header=sheadings,pipe=pipe,delim=delim,newline=newline)
+	if file: pipe.close()
+
+def nts2iupac(nts):
+	X = {'A':'A', 'T':'T', 'C':'C', 'G':'G', 'N':'N', 'U':'U', '-':'-'}
+	
+	X['GT'] = 'K'
+	X['AC'] = 'M'
+	X['CGT'] = 'B'
+	X['ACG'] = 'V'
+	X['CG'] = 'S'
+	X['AT'] = 'W'
+	X['AGT'] = 'D'
+	X['CT'] = 'Y'
+	X['AG'] = 'R'
+	X['ACT'] = 'H'
+	
+	X['AA'] = 'A'
+	X['TT'] = 'T'
+	X['CC'] = 'C'
+	X['GG'] = 'G'
+	
+	nts = ''.join(sorted(map(lambda x: x.upper(), nts)))
+	return X[nts]
+	
+	
+
+def readFasta(faname, usealtid=False, split='^>', idPat='', addins=[], TOUPPER=False, VERBOSE=False):
+	"""Parses a multiple fasta file into a dictionary object keyed by fasta identifier. 
+	Option to key the dictionary by an alternative id found in the fasta header: altid=True|False.
+	If directory of several fasta files is provided as faname, loads them into single dictionary.
+	"""
+	fadict = {} # return dictionary of fasta entries
+	faj = '' # load all information into single data string, faj
+	files = getFiles(faname)
+	
+	for f in files:
+		if VERBOSE: print '- Loading %s'%(f)
+		fh = open(f)
+		fa = fh.readlines()
+		fh.close()
+		# remove comment lines
+		faj += ''.join(filter(lambda x: not re.match(' *#.*', x) and True, fa))
+	
+	
+	# parse by entry (>)
+	getentries = re.compile(split, re.MULTILINE)
+	faentries = re.split(getentries, faj)
+	
+	# for some reason the first entry is the null string
+	faentries.pop(0)
+	
+	# parse individual entries
+	for entry in faentries:
+		# first  has format >name other-header-info
+		(header, seq) = entry.split("\n", 1)
+		# trim off the '>' character
+		theid = ""
+		altid = ""
+		info = ""
+		# further split up the info - for use of alternative identifier
+		pattern = '^(\S+) (.*)$'
+		if re.match(pattern, header):
+			(crap, theid, info, crap) = re.split(pattern, header)
+			info = info.strip(' ').strip('\t')
+			if len(info) > 0:
+				#print "\""+info+"\""
+				(crap, altid, info, crap) = re.split('(\S+)(.*)', info)
+				info = info.strip(' ').strip('\t')
+		else:
+			theid = header
+			altid = ""
+		
+		# remove newlines so the sequence data is contiguous
+		seq = re.sub("\n", "", seq)
+		# remove terminal whitespace
+		seq = seq.strip(' ')
+		
+		if idPat != '':
+			crap, theid, crap = re.split(idPat, theid)
+			#print 'theid', theid
+		
+		for pre,suf,pat in addins:
+			if re.match(pat, theid):
+				# print 'theid', theid, 'pat', pat
+				theid = pre+theid+suf
+				# print 'new', theid
+		
+		if TOUPPER:
+			seq = seq.upper()
+		
+		# build the entry
+		# add a little check to see if there are repeat entries
+		if fadict.has_key(theid):
+			print theid, ": This key has already been used to store another fasta entry!"
+		else:
+			# build the entry for this id
+			# allow choice of primary dict key
+			if theid and altid and usealtid:
+				#print "OK", theid, altid
+				fadict[altid] = {'id':theid, 'altid':altid, 'info': info, 'seq': seq}
+			else:
+				fadict[theid] = {'id':theid, 'altid':altid, 'info': info, 'seq': seq}
+	return fadict
+
+def list2fasta(seqs=[], ids=[]):
+	dct = dict()
+	uid = 0
+	for i in range(len(seqs)):
+		theid = str(uid)
+		try: theid = ids[i]
+		except IndexError: pass
+		dct[theid] = {'id':theid, 'seq':seqs[i], 'info':''}
+		uid += 1
+	return dct
+
+def printFasta(fadict, file='', pipe=sys.stdout, key='seq', usealtid=False):
+	"""Print a dictionary of fasta entries to a file in mfasta format"""
+	keys = fadict.keys()
+	keys.sort()
+	
+	if file: pipe = open(file,'w')
+	
+	for theid in keys:
+		if 'altid' in fadict[theid] and not usealtid:
+			header = '>'+theid+' '+fadict[theid]['altid']+' '+fadict[theid]['info']
+		elif 'id' in fadict[theid]:
+			header = '>'+theid+' '+fadict[theid]['id']+' '+fadict[theid]['info']
+		else:
+			header = '>'+theid+' '+fadict[theid]['info']
+		print >> pipe, header
+		print >> pipe, fadict[theid][key]
+		print >> pipe
+	
+	if file: pipe.close()
+
+def fasta2Phylip(dct={}, file='phylipi.txt', infile='', verbose=False):
+	"""Convert a fasta file into Phylip interleaved format."""
+	# print infile
+	d = dct
+	
+	if infile: d = readFasta(infile)
+	
+	names = d.keys()
+	# fix length
+	maxlen = 10+1
+	shorts = ['' for i in range(len(names))]
+	for i in range(len(names)): 
+		shorts[i] = fixspacing(names[i], maxlen)
+	blank = fixspacing('',maxlen)
+	taxa = len(names)
+	# print d
+	# print 'test', d[d.keys()[0]]
+	alilen = len(d[d.keys()[0]]['seq'])
+	seqs = ['' for i in range(taxa)]
+	
+	if verbose: print shorts
+	if verbose: print taxa, alilen
+	if verbose: print map(len, seqs)
+	enc = 'ascii'
+	for i in range(taxa): seqs[i] = d[names[i]]['seq'].encode(enc)
+	
+	# print out an interleaved phylip formatted file
+	pos = 0
+	fh = open(file, 'w')
+	# alilen = 715
+	fh.write(str(taxa)+' '+str(alilen)+'\n'.encode(enc))
+	
+	for i in range(taxa):
+		fh.write(shorts[i]+seqs[i][pos:pos+maxlen]+' '+seqs[i][pos+maxlen:pos+2*maxlen]+' '+seqs[i][pos+2*maxlen:pos+3*maxlen]+' '+seqs[i][pos+3*maxlen:pos+4*maxlen]+'\n'.encode(enc))
+	pos = 2*maxlen
+	fh.write('\n'.encode(enc))
+	
+	while pos < alilen:
+		for i in range(taxa):
+			fh.write(blank+seqs[i][pos:pos+maxlen]+' '+seqs[i][pos+maxlen:pos+2*maxlen]+' '+seqs[i][pos+2*maxlen:pos+3*maxlen]+' '+seqs[i][pos+3*maxlen:pos+4*maxlen]+'\n'.encode(enc))
+		pos += 4*maxlen
+		fh.write('\n'.encode(enc))
+	
+	fh.close()
+	
+	return 1
+
+
+def unique(lst):
+	"""Returns a subset of lst containing the unique elements."""
+	d = {}
+	for i in lst:
+		if i not in d: d[i] = 0
+		else: d[i] += 1
+	e = d.keys(); e.sort()
+	return e
+
+
+def unzip(thread):
+	"""Reverse of the built-in method zip."""
+	try:
+		if len(thread):
+			return [[thread[i][j] for i in range(len(thread))] for j in range(len(thread[0]))]
+		else: return []
+	except ValueError: return []
+
+
+eq = lambda s: lambda i: str(s)!=str(i)
+filterstr = lambda s: lambda v: filter(eq(s), v)
+
+def argmax(v):
+	"""Return argmax of a list"""
+	mi = 0
+	mv = v[0]
+	for i in range(1,len(v)):
+		if float(v[i]) > float(mv):
+			mv = float(v[i])
+			mi = i
+	return mi
+
+def argmin(v):
+	"Return argmin of a list"
+	mi = 0
+	mv = v[0]
+	for i in range(1,len(v)):
+		if v[i] < mv:
+			mv = v[i]
+			mi = i
+	return mi
+
+
+def slash(astr):
+	if not len(astr): return '/'
+	elif astr[-1] !='/': astr+='/'
+	elif astr[len(astr)-2:len(astr)] == '//': astr = astr[:-1]
+	return astr
+
+def makeContigs(intervals):
+	intervals.sort()
+	# print intervals[0:100]
+	# combine overlaps
+	coverage = 0 # total bases mapped
+	contigs = []
+	curr = 1
+	while curr < len(intervals):
+		bak = curr
+		start = intervals[curr-1][0]; stop = intervals[curr-1][1]
+		
+		while curr < len(intervals) and intervals[curr][0] <= stop:
+			if intervals[curr][1] > stop: stop = intervals[curr][1]
+			curr += 1
+		
+		contigs += [(start,stop)]
+		coverage += abs(start-stop)
+		curr += 1
+	# print 'contigs', contigs
+	return {'contigs':contigs, 'coverage':coverage}
+
+
+roundna = lambda e: lambda x: ((x==nastr or e==nastr) and nastr) or round(float(x),int(e))
+floatna = lambda x: x == nastr and nastr or float(x)
+intna = lambda x: (x == nastr or x == '' or x == 'NA' and nastr) or int(x)
+sumna = lambda lst: sum(filterstr(nastr)(map(floatna, lst)))
+
+def factit(x):
+	"""Iterative implementation of factorial function."""
+	if x <= 1: return 1
+	a = [0 for i in range(x+1)]
+	a[0] = 1; a[1] = 1
+	for i in range(2,x+1): a[i] = i*a[i-1]
+	return a[x]
+
+nchoosek = lambda n,k: factit(n)/(factit(k)*factit(n-k)) # binomial coefficient
+prod = lambda lst: reduce(mul, lst) # product function
+
+def avg(lst):
+	try: return reduce(add, lst)/float(len(lst))
+	except TypeError: return nastr
+
+def avg0(lst):
+	try: return reduce(add, lst)/float(len(lst))
+	except TypeError: return 0
+
+def wavg(v, w):
+	if len(v) == 0: return ret
+	if len(w) > 0 and len(w) != len(v): return ret
+	return sum([v[i]*float(w[i]) for i in range(len(v))])
+
+
+def harmonicMean(v, minval=1e-20):
+	if len(v) == 0: return 0
+	# prevent 0 division
+	v = map(lambda x: x==0 and minval or x, v)
+	return len(v) / sum(map(lambda x: 1./x, v))
+
+def wHarmonicMean(v, w, minval=1e-20):
+	if len(v) == 0: return 0
+	if len(w) > 0 and len(w) != len(v): return 0
+	# prevent 0 division
+	v = map(lambda x: x==0 and minval or x, v)
+	# return len(v) / sum(map(lambda x: 1./x, v))
+	return sum(w) / sum(map(lambda x,y: y/x, v,w))
+
+def geometricMean(lst):
+	try: return reduce(mul, lst)**1/float(len(lst))
+	except TypeError: return 0
+
+
+ssd = lambda lst, mu: reduce(add, map(lambda x: (x-mu)*(x-mu), lst))
+def variance(lst):
+	try: return ssd(lst,avg(lst))/float((len(lst)-1))
+	except TypeError: return nastr
+
+def sd(lst):
+	try: return math.sqrt(variance(lst))
+	except TypeError: return nastr
+
+def percentile(v=[], k=0.5):
+	"""
+	Return the value of array that corresponds to the kth percentile of the data.
+	"""
+	if len(v) <= 0: return 0.0
+	temp = map(float, v)
+	temp.sort()
+	n = len(temp)
+	idx = float(k)*(n+1)
+	lidx = math.floor(idx)
+	hidx = math.ceil(idx)
+	if idx < 1.0:
+		return float(temp[0])
+	elif idx > n-1:
+		return float(temp[n-1])
+	elif not (idx == lidx or idx == hidx):
+		return float(temp[int(lidx)] + temp[int(hidx)])/2.0
+	else:
+		return float(temp[int(idx)])
+
+median = lambda v: percentile(v,.5)
+getQuants = lambda dat: ','.join([str(q)+':'+str(round(percentile(dat, q),4)) for q in [0.05, 0.25, 0.5, 0.75, 0.95]])
+
+# list operations
+head = lambda x: x[0]
+tail = lambda x: x[len(x)-1]
+car = lambda x: x[0]
+cdr = lambda x: x[len(x)-1]
+
+# arithmetic operations with missing values
+addna = lambda m, v: ((m==nastr or v==nastr or float(v)==0.0) and nastr) or float(m) + float(v)
+subna = lambda m, v: ((m==nastr or v==nastr or float(v)==0.0) and nastr) or float(m) - float(v)
+multna = lambda m, v: ((m==nastr or v==nastr or float(v)==0.0) and nastr) or float(m) * float(v)
+divna = lambda m, v: ((m==nastr or v==nastr or float(v)==0.0) and nastr) or float(m) / float(v)
+roundna = lambda e: lambda x: ((x==nastr or e==nastr) and nastr) or round(float(x),int(e))
+
+def makeRange(xmin,xmax,interval=None,n=None):
+	if n == None: n = int(abs(xmax-xmin)/float(interval))
+	else: 
+		interval = (xmax-xmin)/float(n)
+		interval += interval/float(n-1)
+	return [xmin+interval*i for i in range(n)]
+
+
+def histogram(dat, nbins=100, bins=[], categorical=False, yfreq=False, logscale=False, logbase=10, shift=0, dtype=None):
+	import math
+	if logscale: dat = map(lambda x: math.log(x,logbase), dat)
+	
+	if len(bins) > 0: 
+		# print 'problem?'
+		nbins = len(bins)
+		givenbins = True
+	else: givenbins = False
+	
+	# need to create a histogram
+	filt = filterstr(nastr)(dat)
+	if dtype: filt = map(dtype, filterstr(nastr)(dat))
+	dat = None
+	if not len(filt): return [[0,0]]
+	
+	counts = [0 for i in range(nbins)]
+	if not givenbins and not categorical: bins = makeRange(min(filt), max(filt), n=nbins)
+	elif not givenbins: bins = unique(filt)
+	
+	# minor bin correction for plotting
+	if shift != 0: bins = map(lambda x: x+shift, bins)
+	
+	# this is like O(N2) too slow
+	if not categorical:
+		for j in range(len(filt)):
+			k = 0
+			# print j, len(filt)
+			while k < nbins and float(filt[j]) > bins[k]: 
+				k +=1
+			if k == nbins: k -= 1
+			counts[k] += 1
+	else:
+		bindct = {}
+		for b in bins: bindct[b] = 0
+		bk = bindct.keys()
+		for j in range(len(filt)): bindct[filt[j]] += 1
+		# convert back to a histogram
+		bins = []; counts = []
+		for key in bindct.keys(): bins += [key]; counts += [bindct[key]]
+	
+	tmp = []
+	intnbins = int(nbins)
+	# counts or frequency?
+	if yfreq:
+		tot = float(sum(counts))
+		if logscale: tmp = [[logbase**bins[k],counts[k]/tot] for k in range(intnbins)]
+		else: tmp = [[bins[k],counts[k]/tot] for k in range(intnbins)]
+	if logscale: tmp = [[logbase**bins[k],counts[k]] for k in range(intnbins)]
+	else: tmp = zip(bins,counts)
+	
+	if categorical: tmp = sorted(tmp)
+	
+	return tmp
+
+
+def reHist(hist,bins, freq=False):
+	# aggregates an existing histogram in terms of new bins
+	
+	newhist = dict( map(lambda x: (x,0), bins) )
+	nbins = len(bins)
+	# which bins corresponds to this key?
+	binmap = {}
+	
+	for k in transpose(hist)[0]:
+		newbini = 0
+		while newbini < nbins and bins[newbini] < k:
+			newbini += 1
+		if newbini >= nbins: newbini = nbins-1
+		binmap[k] = bins[newbini]
+	
+	for k,v in hist:
+		newhist[binmap[k]] += v
+	
+	ret = sorted(newhist.items())
+	
+	#
+	if freq:
+		tot = float(sum(transpose(ret)[1]))
+		# if logscale: tmp = [[logbase**bins[k],counts[k]/tot] for k in range(intnbins)]
+		# else: tmp = [[bins[k],counts[k]/tot] for k in range(intnbins)]
+		ret = [[bins[k],ret[k][1]/tot] for k in range(len(bins))]
+	
+	return ret
+
+
+
+log = lambda x: math.log(x, 10)
+ln = lambda x: math.log(x, math.e)
+
+# dictionary keyed by ascii character returning phred q-score
+# ascii 33 to 126 - full range
+fastqchars = ['!', '"', '#', '$', '%', '&', "'", '(', ')', '*', '+', ',', '-', '.', '/', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?', '@', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '[', '\\', ']', '^', '_', '`', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '\{', '\|', '\}', '~']
+A2Q = dict(zip(fastqchars, range(len(fastqchars))))
+
+# string conversion to integer (potentially a long)
+encodeNt = lambda x: x=='A'and'1' or x=='T'and'2' or x=='C'and'3' or x=='G'and'4' or x=='N'and'5'
+encodeSeq = lambda seq: int(''.join(map(encodeNt, seq)))
+encodeSeqStr = lambda seq: ''.join(map(encodeNt, seq))
+decodeNt = lambda x: x=='1'and'A' or x=='2'and'T' or x=='3'and'C' or x=='4'and'G' or x=='5'and'N'
+decodeSeq = lambda val: ''.join(map(decodeNt, str(val)))
+
+encodeQ = dict(zip(fastqchars, map(str,range(10,len(fastqchars)+10)))) # every character is 2 integer digits
+decodeQ = dict(zip(map(str,range(10,len(fastqchars)+10)), fastqchars))
+encodeQual = lambda qual: int(''.join(map(lambda x: encodeQ[x], qual)))
+pairUP = lambda qual: map(lambda x: qual[x-1]+qual[x] ,range(1,len(qual),2))
+decodeQual = lambda qual: ''.join(map( lambda x: decodeQ[x], pairUP(str(qual)) ))
+
+isNT = lambda x: (x=='A' or x=='T' or x=='C' or x=='G' and True) or False
+
+def rc(seq=''):
+	"Translates a nucleotide sequence (including degenerate symbols) into its reverse complement. Always returns uppercase."
+	
+	# m=(a/c) => k=(t/g)
+	# r=(a/g) => y=(t/c)
+	# s=(c/g)
+	# v=(a/g/c) => b=(t/g/c)
+	# w=(a/t)
+	# h=(a/t/c) => d=(a/t/g)
+	# n=(a/t/g/c)
+	srev = lambda c:\
+		(c=='A'and'T') or (c=='T'and'A') or (c=='C'and'G') or (c=='G'and'C') or (c=='U'and'A') or\
+		(c=='a'and't') or (c=='t'and'a') or (c=='c'and'g') or (c=='g'and'c') or (c=='u'and'a') or\
+		(c=='-'and'-') or (c=='M'and'K') or (c=='K'and'M') or (c=='R'and'Y') or (c=='Y'and'R') or\
+		(c=='-'and'-') or (c=='m'and'k') or (c=='k'and'm') or (c=='r'and'y') or (c=='y'and'r') or\
+		(c=='S'and'S') or (c=='V'and'B') or (c=='B'and'V') or (c=='W'and'W') or \
+		(c=='s'and's') or (c=='v'and'b') or (c=='b'and'v') or (c=='w'and'w') or \
+		(c=='H'and'D') or (c=='D'and'H') or 'N' or \
+		(c=='h'and'd') or (c=='d'and'h') or 'n'
+		
+	rcseq = map(srev, seq)
+	rcseq.reverse()
+	rcseq = ''.join(rcseq)
+	return rcseq
 
 
 def getChromsFromHeader(mapfile, fileformat='sam'):
@@ -848,6 +1470,7 @@ def filterReplicateReadsPos(indirfile, outdir, patterns=[], verbose=False, tol=3
 				plot.hist(histdat=hist, xlabel='Number of reads sharing chrom,pos,strand', ylabel='Frequency of distinct genomic loci', bins=bins, legend=leg, file=outdir+'%s_%sread_error_distribution_log.pdf'%(name,tolerance), rotateLabels=-45, custom='set size ratio .33; set yrange [1e-8:5]; set grid', logscale='y', yfreq=1, showstats=0)
 			except ImportError: pass
 	return 1
+
 
 # matches based on shared sequence - exact sequence
 def filterReplicateReads(indirfile, outdir, name, ud, mm, T=2, seed=[0,36], verbose=False, redo=False, replot=False):
@@ -1180,6 +1803,64 @@ def filterReplicateReads(indirfile, outdir, name, ud, mm, T=2, seed=[0,36], verb
 	return 1
 
 
+
+
+#
+def threadListPairs(A,B,inner=True,lena=1):
+	pairs = []
+	genes = []
+	Adct = {}
+	for i in range(len(A)): 
+		# print 'storing', A[i][1], 'into key', A[i][0]
+		Adct[A[i][0]] = A[i][1]
+	
+	for i in range(len(B)):
+		name = B[i][0]
+		if name in Adct:
+			pairs += [[Adct[name], B[i][1]]]
+			# print 'adding', pairs[-1]
+			genes += [name]
+		elif not inner:
+			if lena > 1: pairs += [([nastr for x in xrange(lena)], B[i][1])]
+			else: pairs += [(nastr, B[i][1])]
+			genes += [name]
+	# print 'returning', pairs
+	return genes, pairs
+#
+def threadSetPairs(lst,inner=True,flat=True):
+	if len(lst) ==1: 
+		n,d = unzip(lst[0])
+		d = [[x] for x in d]
+		return n,d
+	if not len(lst): return [],[]
+	
+	# if list contents are themselves lists or tuples, make sure they are listed
+	if type(lst[0][1][1]) == type(()):
+		# print 'we have tuples', lst[0][1]
+		# print lst[0]
+		lst[0] = [[lst[0][i][0], list(lst[0][i][1])] for i in xrange(len(lst[0]))]
+		lst[1] = [[lst[1][i][0], list(lst[1][i][1])] for i in xrange(len(lst[1]))]
+	
+	ans = threadListPairs(lst[0], lst[1], inner)
+	# print 'answer', ans
+	
+	lena = 2
+	for i in range(2,len(lst)):
+		ans = threadListPairs(zip(*ans), lst[i], inner, lena=lena)
+		lena += 1
+	# final flattening of data
+	if flat:
+		# print 'flattening', ans[1]
+		# return [ans[0],[flatten(row) for row in ans[1]]]
+		return [ans[0],map(flatten,ans[1])]
+	else:
+		return [ans[0],ans[1]]
+#
+def joinSet(lst,inner=True,flat=True):
+	return threadSetPairs(lst,inner,flat=flat)
+
+
+
 # =========================================================
 # PROGRAM INITIALIZATION
 # =========================================================
@@ -1191,12 +1872,14 @@ SGEMEM = '-l mem_free=8G -l h_vmem=8G'
 xflag = 'bychrom'
 KEEPALIVE = False
 JOINPIECES = False
-PYTHONPATH = ''
+CLEANJOINPIECES = False
+FORCEJOIN = False
+SGEPYTHONPATH = '/ifs/h/simola/core/simolacode/build/lib.linux-x86_64-2.4'
 USESWALLOW = False; swallowpath = 'swallow'
 
 python = 'python'
 glimmrpath = ''
-glpath = 'glimmrLikelihoodHet.py'
+glpath = slash(getPath(sys.argv[0]))+'glimmrLikelihoodHet.v%s.py'%(GLIMMR_VERSION)
 outdir = slash(os.getcwd())
 
 # btdirs = ['/data15/simola/solseq/bowtie-0.11.3/', '/home/simola/core/bowtie/', '/Users/simola/bin/bowtie-0.12.5/', '/ifs/h/simola/core/bowtie/']
@@ -1220,7 +1903,7 @@ PID = None
 RUNALIGN = False                # align reads to reference genome using bowtie
 REALIGN = False                 # realign reads
 ALIGNTOOL = 'bowtie2'           # bowtie, tophat, bowtie2
-STRATEGY = 'all'                # broad mapping strategy
+STRATEGY = 'best'                # broad mapping strategy
                                 # one of: all, unique, best, bestno [default: all]
                                 # unique: genotype using uniqely aligned reads only (--bestm -m 1)
                                 # best: genotype using best-guess aligned reads only (--bestk -m 1)
@@ -1231,7 +1914,7 @@ alignmentPolicy = 'bestk'       # bowtie1: basic, best, all, bestk, bestm, maq-b
                                 # bowtie2: all, bestk, bestm
                                 
 mismatches = {'SE':1, 'PE':1}   # number of mismatches for bowtie alignment (-v mismatches[x])
-maxnumalign = 10                # maximum number of alignments a read could have, 
+maxnumalign = 1                 # maximum number of alignments a read could have, 
                                 # subject to -k mismathces (ONLY FOR policies bestm and bestk)
                                 # set this to the expected read coverage
 
@@ -1342,8 +2025,9 @@ maxreadlen = 150                # maximum read length (for precomputing probabil
 fragDiameter = 150              # mean of the bioanalyzer size distribution
 fragUpperBound = 25             # extra ~1SD from the bioanalyzer size distribution
 
-Lambda = 0.67                   # weighting factor; larger values up-weight global binomial pr.
-expPhred = 35.                   # global expected per-base error rate
+Lambda = 1.0                    # weighting factor; larger values up-weight global binomial pr.
+                                # previous default was 0.67 for dual global + site-specific binomial model
+expPhred = 35.                  # global expected per-base error rate
 
 # Qsample = .5                  # fraction of biological sample containing PTM mark
 
@@ -1384,9 +2068,321 @@ MERGESORT = False
 SAVEALLPOSTERIOR = False      # trigger to report all results regardless of posterior variable state
 # DEGCACHESIZE = None           # number of degenerate positions cached before clearing (defaults to glimmrLikelihood value)
 
+HUGLY = None # provide the directory of fasta files for more memory-efficient threading
+bounds2Ref = {}
 
 # CLI ARGS
 # -------------------------------------------------------------------
+help = """
+glimmrHet.py v%s
+
+Full help menu: glimmrHet.py --help/-h
+Description and requirements: glimmrHet.py --version/-v
+Web page: XXX
+Latest version: XXX
+
+Usage: glimmrHet.py -r ref.fa (-m mapfile.txt|-id samplename) [options]
+
+ChIPseq analysis with an existing read map file:
+   The read map file should be named <mapdir>/samplename.map, where samplename
+   is provided in SampleID field of the map file (see below).
+   
+   If the read map file contains unique reads only (if already sorted, 
+   include --nosort to avoid resorting):
+   > glimmrHet.py -r ref.fa -i <mapdir> --link --index -id samplename -s
+   
+   If the read map file contains both unique and non-unique reads, use 
+   --exO to partition the file into unique and non-unique portions:
+   > glimmrHet.py -r ref.fa -i <mapdir> --exO --index -id samplename -s
+
+Read mapping and genotyping:
+   > glimmrHet.py -r ref.fa -m mapfile.txt -z
+   
+   This will align raw NGS reads, organize and index reads, perform 
+   genotyping, and provide diagnostics and new assemblies for all 
+   samples listed in the map file. Results will be stored in a new 
+   directory 'glimmr_results' in your current working directory.
+   
+   Note, -z is equivalent to writing 
+   "-a -O --index -s -d --saveass -Q 40 --fwer 0.05,50"
+
+Use glimmrHet.py -h for a complete description of arguments.
+
+
+Standard arguments
+==================
+   -m <STR>:       map file (see below for format)
+   -r <STR>:       reference genome (required, fasta format)
+   -i <STR>:       directory to find pre-existing map file(s)
+   -o <STR>:       directory in which to save results 
+                   (default: current working directory ./)
+  --name <STR>:    name of the output/results directory 
+                   (default: sniper_results)
+   -z:             perform/redo all procedures (equivalent to 
+                   -a -O --index -s -d --saveass -Q 40 --fwer 0.05,50)
+   -a/-ra:         (re)align reads (generate sam-format read maps with bowtie)
+   -O/-rO:         (re)organize read maps into 2 files: 
+                     sampleid.unique.map, sampleid.degenerate.map
+                   then build an index for each file
+  --splitmap       Separate single-end and paired-end reads into different map files
+  --link           if you only have a unique map, this links to that file 
+                   directly rather than organizing new files
+   -exO:           organize a pre-existing read map into the 4 files above 
+                   (Default: sampleID.sam, where sampleID is in mapfile)
+   -s/-rs:         perform/redo SNP calling (and significance filtering)
+   -so/-rso <Q>    perform/redo SNP calling, reporting only SNPs with stringency >= Q
+  --sig:           perform significance filtering on existing genotypes
+  --resig:         redo significance filtering on existing genotypes
+  --diag:          generate diagnostics file summarizing SNP calls
+  --saveass:       create a new fasta file of the reference genome modified 
+                   by significant SNP calls (IUPAC format). NB, by default
+                   -Q 40 is used, but you can return multiple assemblies: 
+                   Ex: --saveassembly -Q 20,30,40,100
+
+Key parameters
+==============
+EX: glimmrHet.py -m <map_file.txt> -r <ref_genome.fasta> -z -k 2 
+    -d 10 -e 30 -l 0.5 --prior resequence --theta 0.01
+
+Arguments:
+  -k <1,2,3>:      maximum number of alignment mismatches (default: 2)
+  -d <INT>:        maximum number of alignments per read (default: 50)
+  -e <INT>:        global sequencing error rate (specified as phred value; 
+                   E.g. Q=30 == P<0.001) (default: 35)
+  -l <FLOAT>:      reweight the likelihood model towards read-specific or 
+                   global binomial probability (default: 0.67 towards binomial)
+  --prior <STR>:   prior probability distribution (default: resequence)
+                   Options: 
+                   resequence:     h0:1-theta-theta^2, t1:theta/2, h2:theta/2, t2:theta^2
+                   resequence-het: h0:1-theta-theta^2, t1:theta, h2:theta^2/2, t2:theta^2/2
+                   uniform:        h0:1-3*theta, t1:theta, h2:theta, t2:theta
+                   maq:            h0:(1-theta-theta^2)/2, t1:theta, h2:(1-theta-theta^2)/2, t2:theta^2
+                   naive:          h0:0.25, t1:0.25, h2:0.25, t2:0.25
+                   haploid:        h0:1-theta, t1:theta
+  --theta <FLOAT>: expected divergence (heterozygous and homozygous) from 
+                   reference genome (default: 0.001)
+
+Read map indexing
+=================
+EX: glimmrHet.py -m <map_file.txt> -r <reference_genome.fasta> --index
+
+Arguments:
+  --index:         sorts and indexes the unique SE and PE map files
+  --reindex:       replaces an existing index
+  --(re)indexuni:  index unique maps only
+  --(re)indexdeg:  index degenerate maps only
+  --nosort:        index only, assuming map files are already sorted
+
+MEMORY / RUNTIME / SCHEDULING options
+=====================================
+EX: glimmrHet.py -m <map_file.txt> -r <reference_genome.fasta> -s -x 5
+For each sampleID, break the genome into 5 pieces, then launch and maintain 
+up to 5 parallel processes on your local machine. The total number of jobs 
+equals 5 times the number of sampleIDs in the map file. If --sge is added 
+schedule jobs across CPUs using Sun Grid Engine.
+
+EX: glimmrHet.py -m <map_file.txt> -r <reference_genome.fasta> -s -x 15 
+    --rest <restriction_file.txt>
+
+This will launch and maintain up to 15 parallel processes, where the total 
+number of jobs is equal to the number of sampleIDs in the map file times the 
+rows in <restriction_file.txt>.
+   -x <INT>:    distribute jobs over <INT> processes on 1 machine (multi-core)
+  --groupchrom: group multiple chromosomes into a single job (default for -x 1)
+  --subchrom:   split each chromosome into -x jobs
+  --bychrom:    process each chromosome as a separate file, regardless of -x
+                (allows you to add more processors mid-run or recover from
+                 errors more quickly.)
+  --ids <STR[,STR,...,STR>: restrict genotyping to a subset of SampleIDs
+ 
+  --stream:     stream the degenerate index (Default: True)
+  --buffer <INT>: sets streaming buffer to approx. <INT> MB (Default: 10)
+ 
+  --sge:        distribute jobs using Sun Grid Engine. If -x > 1 launch 
+                <INT> jobs per sampleID, otherwise launch one job for each 
+                different sample to be processed
+  --lip <INT>:  partition map into <INT> chunks to lower memory requirements
+                (NB, requires <INT> scans of the map file, increasing runtime)
+  --sgemem:     Required memory to launch process on SGE (default: 16G)
+  --rest:       Specify a region or file containing a list of regions over 
+                which to perform genotyping (default: none)
+                EX: "--rest chr1"; genotype the entirety of chr1 only
+                EX: "--rest chr1.chr5"; genotype chrom1 and chr5 only
+                EX: "--rest chr1,0,1000"; genotype positions 0 to 1000 
+                    of chr1, inclusive
+                EX: "--rest chr1,0,1000,-"; genotype all of chr1 excluding 
+                    positions 0 to 1000
+                A restriction file should be a tab-delimited list of one or 
+                more regions similarly described, replacing commas with tabs.
+                Execute this shell command to generate one:
+                echo -e "chrom1\\nchrom2\\nchrom3" > myrest.txt, or
+                echo -e "chrom1\\t0\\t1000\\nchrom5\\t500\\t50000" > myrest.txt
+
+
+Other notable arguments
+=======================
+  --mindepth <INT>: minimum number of reads to evaluate a nucleotide locus
+  --maxdepth <INT>: maximum number of reads to evaluate a nucleotide locus.
+                    If > <INT> reads only the first <INT> will be used.
+  --fasta:       read files do not contain quality scores
+  --qual33:      quality scores follow a phred 33 scale instead of default 
+                 phred 64 scale
+  --peonly:      only use paired end reads for SNP identification
+  --all:         use all reads for mapping (based on --policy bestm with 
+                 maximum of d alignments)
+  --uniq:        only use uniquely mapping reads for SNP identification. Also
+                 if provided with -a for mapping
+                 only return an alignment if it is unique in the reference 
+                 genome given specified maximum mismatches
+                 bowtie arguments: '-v mismatches -a -m 1 --best
+  --best:        generate a best-guess read map, returning an alignment if it
+                 is the one with the fewest mismatches
+                 given specified maximum mismatches
+                 bowtie arguments: '-v mismatches -k 1 --best'
+  --bestno:      similar to --best but discard reads which have multiple 
+                 equally best alignments
+  --mapqual      use read quality values during mapping (bowtie -n mode with
+                 default parameters)
+  --colorspace:  input files are in ABI SOLiD colorspace format 
+                 (suffix .csfasta and .qual)
+                 NB, currently only works with single-end reads
+  --ins <FLOAT>: estimate insert size range for paired-end reads as the 
+                 <FLOAT> percentile of the empirical distribution 
+                 (default: 0.99) (see below for more details)
+  --globalerror: estimate expected per-nucleotide sequencing error rate from 
+                 your read map
+  --cstheta <FLOAT>: Haploid proportion of divergence between sample and 
+                     reference genomes (default: 3/2 theta)
+  --qual-int:    sets the --integer-quals flag in bowtie
+  -Q <INT[,INT,...,INT]>: Comma-delimited list of phred-quality scores for
+                          which to compute significance (Default: 40)
+  -fwer <FLOAT,INT>: Filter significant SNPs using a family-wise error rate 
+                     of <FLOAT> and an average read length of <INT>. This 
+                     corrects the posterior probability for each genotyped 
+                     locus for multiple testing of all loci that utilize the 
+                     same set of NGS alignments. The Q stringency required for
+                     significance is -10 log( <FLOAT> / (2 <INT> dbar) ), 
+                     where <FLOAT> is the error rate (e.g. 0.01), <INT> is the
+                     read length (e.g. 50), and dbar is the estimated mean 
+                     number of total alignments for all reads that overlap the
+                     current locus of interest (Default: 0.05,50).
+  --nominal:     Instead of waiting until the whole genome is processed before
+                 returning significant SNPs, this updates a file 
+                 sampleID.nominal.txt with potential significant SNPs
+                 concurrent with processing.
+  --suffix <STR>:    Change default map file suffix to FILENAME.<STR> [Default: sam]
+
+Bowtie mapping options
+======================
+  --bowtie/-btd: Specify the base directory of your bowtie installation 
+                 (e.g. --btd /usr/bin/bowtie-0.12.5) (default: '')
+  --keepbowtie/--kb: Do not delete the original bowtie SAM file following 
+                     read organization
+  --btx <INT>:   number of processors used for mapping
+  --policy:      Specify Bowtie alignment policy (default: bestk)
+                 Options:
+                 * 'basic': 'bowtie -n <mismatches> -m 1 (Maq-like)
+                 * 'all': 'bowtie -v <mismatches> -a (end-to-k all alignments)
+                 * 'bestk': -v <mismatches> -k <max num alignments> --best
+                 * 'bestm': -v <mismatches> -a -m <max num alignments> --best
+  --kpe: Permit a maximum number of alignment mismatches for paired-end reads
+  --kse: Permit a maximum number of alignment mismatches for single-end reads
+  --trimreads n5,n3: For alignment, consider read substring from 1+n5...|r|-n3
+  --realign/--ra: perform new Bowtie alignment, replacing existing alignments
+  --integer-quals: invokes Bowtie flag of same name (default: NA)
+  --btcustom:      arbitrary custom string fed directly to bowtie (default: NA)
+
+Map file format
+===============
+The map file is a standard tab-delimited text file indicating how each raw 
+sequence reads file should be processed by sniper. The format is organized as 
+one row per sequenced lane and requires 7 columns of information row, as 
+follows:
+
+#!Run Lane SampleID       Alias RefGenome           PairedEnd Path
+  1   1    myfirstgenome  foo   /path/to/ref_genome 0         /path/to/run1/
+  2   5    mysecondgenome bar   /path/to/ref_genome 1         /path/to/run2/
+
+(If you copy/paste this, make sure to convert spaces to tabs.)
+
+In this example, the first sample was run on lane 1 and contains single-end 
+reads. The second sample was sequenced on lane 5 and contains paired-end reads.
+The standard mapper used with glimmrHet.py is bowtie, so the specified reference 
+is the name of the respective index file, excluding file suffix.
+
+The first line shows the headers but is treated as a comment; 
+comments are discarded by Sniper.
+
+Raw sequence read files should contain as a substring the label indicated 
+in the Lane column and placed in the /path/to/reads/directory/ directory. 
+
+For example the first sample file may be named 's_1_sequence.txt' or 
+'testing1.txt'. The second sample should have 2 files since it is 
+paired-end, named 's_5_1_sequence.txt' and 's_5_2_sequence.txt'. 
+Colorspace files should take the format 's_1_sequence.csfasta' 
+and 's_1_sequence.qual' for the fasta and quality files, respectively. 
+
+Additional fields may be added to the map file after the required columns 
+(e.g. concentration, date sequenced, author, etc.).
+
+To specify the prior model and theta parameter value in the map file, 
+include headings "Prior" and "Theta" after "Path" and include the 
+particular prior and theta values for each sample. Missing values are 
+tolerated, in which case those samples will be processed with the 
+default values.
+
+Estimating insert size distribution for paired-end data
+=======================================================
+Two-step execution for paired-end read data:
+1. glimmrHet.py -m <map_file.txt> -r <reference_genome.fasta> --ins
+2. glimmrHet.py -m <map_file.txt> -r <reference_genome.fasta> -z
+
+By default paired-end reads are mapped using an insert size range of 
+0 to 350 nt. Users may specify custom min and max bounds using
+
+  --minins: Specify the minimium insert size for all samples
+  --maxins: Specify the maximum insert size for all samples
+
+Alternatively use '--ins <FLOAT>' to estimate the empirical insert size 
+distribution for each sample specified in the map file:
+
+  --ins <FLOAT>: Estimate insert size distributions for all samples specified 
+                 in the map file using the percentile <FLOAT>[0,1] of the 
+                 insert size distribution for alignment (default: 0.99)
+
+Note that alignments must first be generated using '-a'. 
+A file 'PE_insert_size.txt' will be created in the specified output directory 
+that Sniper will use by default if samples are mapped again 
+(using '--realign/--ra'). 
+"""%(GLIMMR_VERSION)
+
+
+version = """\nglimmrHet.py, version %s
+January 2012
+Daniel F. Simola, Ph.D.
+Laboratory of Shelley L. Berger, Ph.D.
+University of Pennsylvania
+http://www.med.upenn.edu/berger/
+
+About Glimmr: XXX
+
+Requires Unix/Mac OS X/CYGWIN with Python 2.5 or 2.6 
+(preferably 64-bit for memory allocation > 4GB)
+
+Copyright (c) 2011, Daniel F. Simola and Shelley L . Berger, University of
+Pennsylvania. All Rights Reserved.
+
+You may not use this file except in compliance with the terms of our License. 
+You may obtain a copy of the License at 
+http://kim.bio.upenn.edu/software/LICENSE
+
+Unless required by applicable law or agreed to in writing, this software is 
+distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, 
+either express or implied.  See the License for the specific language governing
+permissions and limitations under the License.
+
+"""%(GLIMMR_VERSION)
+
 nhelps = 0; helplimit = 0
 args = sys.argv[:]
 argstr = ''.join(args)
@@ -1403,35 +2399,44 @@ while ai < len(args):
 	if re.match('out|^o$', arg): outdir = slash(val)
 	elif arg == 'python' or arg == 'python-version': python = val
 	elif arg == 'glimmrPath' or arg == 'glimmrpath' or arg == 'glpath': glpath = val
-	elif arg == 'swallow': USESWALLOW = True; swallowpath = val
-	# elif arg == 'swallowpath': swallowpath = val
-	
-	elif arg == 'sge': USESGE = True; ai-=1
-	elif arg == 'memsge': SGEMEM = '-l mem_free=%s -l h_vmem=%s'%(val.upper(),val.upper())
-	elif re.match('^subchrom$', arg): xflag = 'subchrom'; ai-=1
-	elif re.match('^bychrom$', arg): xflag = 'bychrom'; ai-=1
-	elif re.match('^crosschrom$', arg): xflag = 'crosschrom'; ai-=1
-	elif re.match('^groupchrom$', arg): xflag = 'groupchrom'; ai-=1
-	elif re.match('^bysampleid$|^bysample$|^byid$', arg): 
-		# xflag = 'bysampleid'; 
-		BYID = True; ai-=1
-	elif arg == 'token': multichromtoken = val
-	
-	elif arg == 'keepalive': KEEPALIVE = True; ai -= 1
-	
-	elif re.match('^btdir$', arg): btdirs = [slash(val)]
-	elif arg == 'thdir': thdirs = [slash(val)]
-	elif arg == 'cuffdir': cufflinksdir = slash(val)
-	
-	elif re.match('^readmapdir$|^btmapdir$|^i$', arg): SETMAPDIR = True; btmapdir = val
+	elif re.match('^help|h$', arg.lower()): sys.exit(help)
+	elif re.match('^version|v$', arg.lower()): sys.exit(version)
+    
 	elif re.match('^map$|^m$', arg): mapfile = val
-	elif re.match('^mapcut$|^mc$', arg): MAPCUT = True; ai-=1
+	elif arg == 'hugly' or arg == 'refpieces' or arg == 'rp': HUGLY = val; xflag = 'subchrom'
+
 	elif re.match('^name$', arg): 
 		zkey = val
 		if zkey[len(zkey)-1] == '/': zkey = zkey[0:len(zkey)-1]
 	elif arg == 'fasta': readfileformat = 'fasta'; ai-=1
-	# elif re.match('^btprocs$|^btx$', arg): nprocs = int(val)
 	elif re.match('^procs$|^x$', arg): nsubprocs = int(val)
+	
+	elif re.match('noqual|^nq$', arg): Lambda = -1
+	elif arg == 'standard': Lambda = 1.0; maxnumalign = 1; STRATEGY = 'best'; alignmentPolicy = ''; ai-=1
+	elif arg == 'complete': Lambda = 0.67; maxnumalign = 10; STRATEGY = 'all'; alignmentPolicy = 'bestk'; ai-=1
+
+	elif re.match('redoall|^z$', arg): REDOALL = True; ai-=1
+	elif re.match('dryrun', arg): DRYRUN = True; ai-=1
+	elif re.match('verbose|^v$', arg): VERBOSE = True; ai-=1
+	elif arg == 'keepalive': KEEPALIVE = True; ai -= 1
+	
+	elif re.match('^subchrom$', arg): xflag = 'subchrom'; ai-=1
+	elif re.match('^bychrom$', arg): xflag = 'bychrom'; ai-=1
+	elif re.match('^crosschrom$', arg): xflag = 'crosschrom'; ai-=1
+	elif re.match('^groupchrom$', arg): xflag = 'groupchrom'; ai-=1
+	elif re.match('^bysampleid$|^bysample$|^byid$', arg): BYID = True; ai-=1
+	
+	elif arg == 'sge': USESGE = True; ai-=1
+	elif arg == 'memsge': SGEMEM = '-l mem_free=%s -l h_vmem=%s'%(val.upper(),val.upper())
+	elif arg == 'token': multichromtoken = val
+	
+	elif re.match('^btdir$', arg): btdirs = [slash(val)]
+	elif arg == 'thdir': thdirs = [slash(val)]
+	elif arg == 'cuffdir': cufflinksdir = slash(val)
+	elif re.match('^readmapdir$|^btmapdir$|^i$', arg): SETMAPDIR = True; btmapdir = val
+	
+	elif re.match('^mapcut$|^mc$', arg): MAPCUT = True; ai-=1
+	
 	elif arg == 'staggerlaunch': stagger_launch = int(val)
 	elif arg == 'subsample': subsampleFold = float(val)
 	elif re.match('^loadinpieces$|^lip$', arg): LIPieces = int(val)
@@ -1446,7 +2451,9 @@ while ai < len(args):
 	elif arg == 'merge+': MERGESIDS = True; REMOVEPREMERGED = True; ai-=1
 	elif arg == 'merges+': MERGESIDS = True; REMOVEPREMERGED = True; MERGESORT = True; ai-=1
 	
-	elif arg == 'join': JOINPIECES = True; ai-=1
+	elif arg == 'join': JOINPIECES = True; CLEANJOINPIECES = False; KEEPALIVE = True; ai-=1
+	elif arg == 'joinclean': JOINPIECES = True; CLEANJOINPIECES = True; KEEPALIVE = True; ai-=1
+	elif arg == 'forcejoin': FORCEJOIN = True; ai-=1
 	
 	elif arg == 'k': mismatches = {'SE':int(val), 'PE':int(val)}
 	elif arg == 'kpe': mismatches['PE'] = int(val)
@@ -1457,12 +2464,8 @@ while ai < len(args):
 	elif re.match('^xefficiency$|^px$', arg): Pxab = float(val)
 	elif re.match('^lambda$|^l$', arg): Lambda = float(val)
 	elif re.match('^expphred$|^e$', arg): expPhred = float(val)
-	elif re.match('noqual|^nq$', arg): Lambda = -1
 	
 	elif re.match('^ref$|^r$', arg): bfaref = val
-	elif re.match('^policy$|^pol$', arg): alignmentPolicy = val
-	elif re.match('^qual33$', arg): qualstr = '--phred33-quals'; ai-=1
-	elif re.match('^qual64$', arg): qualstr = '--phred64-quals'; ai-=1
 	elif re.match('^trimreads$|^trim$', arg): trim5,trim3 = map(int, val.split(','))
 	elif re.match('^itertrim$|^iter$', arg): ITER_TRIM = map(lambda x: map(int, x.split('-')), val.split(','))
 	
@@ -1470,38 +2473,49 @@ while ai < len(args):
 	elif re.match('^aligntool$',arg): ALIGNTOOL = val
 	elif re.match('^realign$|^ra$', arg): REALIGN = True; ai-=1
 	
-	elif re.match('^rna$', arg): ALIGNTOTRANSCRIPTOME = True;ai-=1
+	elif re.match('^rna$', arg): ALIGNTOTRANSCRIPTOME = True; ai-=1
 	elif arg.upper() == 'GTF' or arg.upper() == 'GFF': gfffile = val
 	
 	elif arg == 'tophat': ALIGNTOOL = 'tophat'; TOPHATFLAGS = val
 	elif arg == 'tophat2': ALIGNTOOL = 'tophat2'; TOPHATFLAGS = val
+	elif arg == 'bowtie2': ALIGNTOOL = 'bowtie2'; BOWTIEFLAGS = val
 	
 	elif re.match('countreads$', arg): COUNTREADS = True; ai-=1
 	
 	elif re.match('usesingletons|pese|sepe|^g$', arg): USESINGLETONS = True; ai-=1
 	elif re.match('peonly|^pe$', arg): USESINGLETONS = False; ai-=1
 	
+	elif re.match('^qual33$', arg): qualstr = '--phred33-quals'; ai-=1
+	elif re.match('^qual64$', arg): qualstr = '--phred64-quals'; ai-=1
+	
 	# mapping strategy selection
+	elif re.match('^policy$|^pol$', arg): alignmentPolicy = val
 	elif re.match('^all$|^total$', arg): STRATEGY = 'all'; ai-=1
 	elif re.match('^uniq$|^unique$', arg): 
 		# only return an alignment if it is unique in the reference genome
 		# given specified maximum mismatches
-		STRATEGY = 'unique'; alignmentPolicy = 'bestm'; maxnumalign = 1; ai-=1
+		# STRATEGY = 'unique'; alignmentPolicy = 'bestm'; maxnumalign = 1; ai-=1
+
+		STRATEGY = 'unique'; alignmentPolicy = 'bestk'; maxnumalign = 2; ai-=1
+		# here, we find up to 2 alignments, run -O and then use the X.unique.map file
+		# which contains the reads that only reported a single alignment.
+
 	elif re.match('^best$|^bestguess$', arg): 
 		# return an alignment if it is the one with the fewest mismatches
 		# given specified maximum mismatches; quasi-randomly break ties
-		STRATEGY = 'best'; alignmentPolicy = 'bestk'; maxnumalign = 1; ai-=1
+		STRATEGY = 'best'; alignmentPolicy = ''; maxnumalign = 1; ai-=1
 	elif re.match('^bestno$|^bestnoguess$', arg):
 		# return an alignment if it is the one with the fewest mismatches
 		# but discard read if multiple equally best alignments exist
 		STRATEGY = 'bestno'; alignmentPolicy = 'bestk'; maxnumalign = 2; ai-=1
-		# technically we map allowing 2 alignments and then SNP call with
-		# the unique maps only
+		# here, we find up to 2 alignments, run -O and discard the read if both alignments
+		# have same number of mismatches; this is more conservative than the standard bestguess
+
 	elif arg == 'mapqual': MAPWITHQUALITY = True; ai-=1
 	
 	elif arg == 'end-to-end': alignmentMode = '--end-to-end --very-sensitive'; ai-=1
 	elif arg == 'local': alignmentMode = '--local --very-sensitive-local'; ai-=1
-	elif arg == 'more' or arg == 'bt-more': userAlignArgs = val
+	elif arg == 'more' or arg == 'bt-more' or arg == 'btmore' or arg == 'btcustom': userAlignArgs = val
 	
 	elif arg == 'ins': GETINSERTSIZE = True; insstat = str(val); RUNALIGN = True; minins=0; maxins=1000
 	elif re.match('minins', arg): minins = int(val)
@@ -1581,18 +2595,15 @@ while ai < len(args):
 	elif re.match('^globalerror$|^ge$', arg): ESTIMATEGLOBALERROR = True; ai-=1
 	
 	elif re.match('^diagnostics$', arg): DIAGNOSTICS = True; ai-=1
-	elif re.match('redoall|^z$', arg): REDOALL = True; ai-=1
-	elif re.match('dryrun', arg): DRYRUN = True; ai-=1
-	elif re.match('verbose|^v$', arg): VERBOSE = True; ai-=1
 	# elif re.match('degcache|^dc$', arg): DEGCACHESIZE = int(val)
 	
 	elif arg == 'saveall': SAVEALLPOSTERIOR = True; ai-=1
 	
 	elif arg == 'pid': PID = val
 	
-	elif re.match('^help|h$', arg.lower()): sys.exit(help)
-	elif re.match('^version|v$', arg.lower()): sys.exit(version)
-    
+	elif arg == 'swallow': USESWALLOW = True; swallowpath = val
+	# elif arg == 'swallowpath': swallowpath = val
+	
 	else:
 		help += "=> The specified argument \""+arg+"\" does not parse."
 		print >> sys.stderr, help
@@ -1602,8 +2613,33 @@ if nhelps < helplimit or re.match('.*-h ', argstr):
 	sys.exit(help)
 # -------------------------------------------------------------------
 
+if maxnumalign > 1:
+	STRATEGY = 'all'; alignmentPolicy = 'bestk';
+
+if HUGLY:
+	if maxnumalign > 1: sys.exit('--hugly flag only compatible with --standard or -d 1.')
+	import glob
+	# want to queue up subchrom calls for each chrom in ref genome, loading only the single chrom at a time
+
+	# by default if i use -subchrom - x 20 without -rest what happens?
+
+	# set boundstr = chr1.chr2.chr3.,,,
+	# and set ref to dir/chr1.fa etc, 
+	reffiles = glob.glob(HUGLY)
+	reffiles = filter(lambda x: '_' not in x, reffiles)
+	# reffiles = getFiles(HUGLY,include='fa', exclude='_')
+	# print 'REFFILES', reffiles
+	
+	reflabs = map(getLabel,reffiles)
+	boundsfile = '.'.join(sorted(reflabs))
+	# print 'boundsfile', boundsfile
+
+	bounds2Ref = dict(zip(reflabs,reffiles))
+	# print 'bounds2ref', bounds2Ref
+
 glimmrpath = args[0]
-pipeit('Path: %s'%(glimmrpath),1)
+pipeit('\n------> %s'%(getFilename(glimmrpath)),1)
+pipeit('------> Path: %s\n'%(glimmrpath),1)
 
 if PID: pipeit('\n'+' '.join(args)+'\n',1)
 
@@ -1634,21 +2670,21 @@ if REDOALL:
 # --------------------------
 zdir = outdir+zkey+'/'
 
-if not SETMAPDIR: btmapdir = zdir+'read_maps_all'
-unmapdir = zdir+'unmapped_reads'
+if not SETMAPDIR: btmapdir = zdir+'mapped_reads_all'
+unmapdir = zdir+'unmapped_reads_all'
 pmadir = zdir+'alignment_mismatches'
 tmpstr = 'ALL'
 
 if STRATEGY=='unique':
-	if not SETMAPDIR: btmapdir = zdir+'read_maps_uni'
+	if not SETMAPDIR: btmapdir = zdir+'mapped_reads_uni'
 	unmapdir = zdir+'unmapped_reads_uni'
 	pmadir = zdir+'alignment_mismatches_uni'
 if STRATEGY=='best':
-	if not SETMAPDIR: btmapdir = zdir+'read_maps_best'
+	if not SETMAPDIR: btmapdir = zdir+'mapped_reads_best'
 	unmapdir = zdir+'unmapped_reads_best'
 	pmadir = zdir+'alignment_mismatches_best'
 if STRATEGY=='bestno':
-	if not SETMAPDIR: btmapdir = zdir+'read_maps_bestno'
+	if not SETMAPDIR: btmapdir = zdir+'mapped_reads_bestno'
 	unmapdir = zdir+'unmapped_reads_bestno'
 	pmadir = zdir+'alignment_mismatches_bestno'
 
@@ -1673,7 +2709,7 @@ resdir = zdir+'results-L%s,E%s,%s,%s/'%(Lambda, expPhred, USESINGLETONS and 'PES
 tmpdir = resdir+'tmp/'
 
 # file suffix depending on map type
-ubamap = '-%s'%(STRATEGY)
+ubamap = '_%s'%(STRATEGY)
 if MAPWITHQUALITY: ubamap += 'q'
 
 logdir = zdir+'log_files/'
@@ -1691,6 +2727,7 @@ createdir(unmapdir); createdir(pmadir)
 
 # save a log file with the user's input arguments
 logfile = zdir+'log_file.txt'
+loglikfile = zdir+'log_lik_file.txt'
 iomethod = 'w'
 if os.access(logfile, os.F_OK): iomethod = 'a'
 fh = open(logfile, iomethod)
@@ -1737,10 +2774,11 @@ for line in fh:
 # works if you dont have the post combos section
 # mapd,runs,head = readTable(mapfile,keepKey=True, header=False)
 prioridx = None; rlidx = None; diamidx = None; subfidx = None
-if 'Prior' in head: prioridx = head.index('Prior') - 1
-if 'ReadLength' in head: rlidx = head.index('ReadLength') - 1
-if 'Diameter' in head: diamidx = head.index('Diameter') - 1
-if 'Subsample' in head: subfidx = head.index('Subsample') - 1
+idxoffset = 1
+if 'Prior' in head: prioridx = head.index('Prior') - idxoffset
+if 'ReadLength' in head: rlidx = head.index('ReadLength') - idxoffset
+if 'Diameter' in head: diamidx = head.index('Diameter') - idxoffset
+if 'Subsample' in head: subfidx = head.index('Subsample') - idxoffset
 # sizeidx = head.index('Size') - 1
 
 seqRuns = {} # keyed by sampleID
@@ -1788,7 +2826,7 @@ for i in range(len(runs)):
 	
 	# fetch sample-specific read length
 	if rlidx:
-		# print 'WTF', mapd[i]
+		# print 'WTF', mapd[i], 'OK', mapd[i][rlidx]
 		sampleReadLengths[sampleID] = int(mapd[i][rlidx].strip())
 		# print sampleID, 'readlength', sampleReadLengths[sampleID]
 	elif READLENBYUSER: 
@@ -1954,6 +2992,7 @@ elif boundsfile:
 		else:
 			sys.exit('Restriction flag not specified properly: '%(boundsfile))
 
+
 # merge likelihood files if split
 # -------------------------------
 if MERGESIDS:
@@ -1979,7 +3018,7 @@ if MERGESIDS:
 			pipeit('- Sorting %s partial files...'%(len(filesToMerge)),1)
 			for fx in xrange(len(filesToMerge)):
 				pipeit('  %s) %s'%(fx+1, '/'.join(filesToMerge[fx].split('/')[-1])),1)
-				os.system('sort -k 1,1 -k 2,2n -S 50% "%s" > "%s"'%(filesToMerge[fx], filesToMerge[fx]+'.sort'))
+				os.system('sort -k 1,1 -k 2,2n -S 50% --parallel=%s "%s" > "%s"'%(nsubprocs, filesToMerge[fx], filesToMerge[fx]+'.sort'))
 			
 			pipeit('- Merging %s files (in above order) into %s'%(len(filesToMerge),mergedFile),1)
 			for afile in filesToMerge:
@@ -2016,6 +3055,50 @@ if os.access(peinsfile, os.F_OK):
 		peinsize[r[i]] = {}
 		for j in range(len(c)):
 			peinsize[r[i]][c[j]] = float(d[i][j])
+
+
+# save a sampleID to fastq files table
+for sampleID in sortseqruns:
+	for run,lane in seqRuns[sampleID].keys():
+		refGenome,hashet,paired,path = seqRuns[sampleID][(run,lane)][:4]
+		UID = '%s-%s-%s'%(sampleID,run,lane)
+		# find the file that is indicated in the map file
+		fastqFiles = sorted(getFiles(path, include=lane, exclude=['pdf','zip']))
+		
+		if paired:
+			# remove extraneous files that do not have the _1 or _2 in them
+			fastqFilesTmp = filter(lambda x: ('_1' in x or '_2' in x) and True, fastqFiles)
+			if not len(fastqFilesTmp):
+				fastqFiles = filter(lambda x: ('R1' in x or 'R2' in x) and True, fastqFiles)
+				del fastqFilesTmp
+			else:
+				fastqFiles = fastqFilesTmp
+			
+			# print 'test', fastqFiles
+			if len(fastqFiles) > 2:
+				print >> sys.stderr, 'Warning: Found more than 2 matching read files. Trying default s_lane_x_sequence.txt format.'
+				fastqFiles = [path+'s_%s_1_sequence.txt'%(lane), path+'s_%s_2_sequence.txt'%(lane)]
+			elif len(fastqFiles) < 2:
+				print >> sys.stderr, 'Skipping: Check read file names or path. Did not find 2 files for sample %s in path "%s": %s'%(lane, path, fastqFiles)
+				continue
+			
+			if not os.access(fastqFiles[0], os.F_OK) or not os.access(fastqFiles[1], os.F_OK): 
+				print >> sys.stderr, 'Skipping: could not find some raw read files. Check paths.'
+				continue
+		else:
+			if len(fastqFiles) > 2:
+				print >> sys.stderr, 'Warning: Found more than 2 matching read files. Trying default s_lane_x_sequence.fastq format.'
+				tmpfiles = ['s_%s_sequence'%(lane)]
+				fastqFiles = sorted(getFiles(path, include=tmpfiles, exclude=['pdf','bz2','zip']))
+				fastqFiles = filter(lambda x: '%s_1'%(lane) not in x and '%s_2'%(lane) not in x, fastqFiles)
+		
+		try: rawfiles[sampleID] += fastqFiles
+		except KeyError: rawfiles[sampleID] = fastqFiles
+
+# save mapping of raw reads to sampleIDs to file
+printTable([[k]+rawfiles[k] for k in sorted(rawfiles.keys())],file=zdir+'readFilesToSampleIDs.txt',ioMethod='w')
+
+
 
 if RUNALIGN or REALIGN:
 	# --solexa1.3-quals: internal quality conversion from solexa to phred64
@@ -2068,6 +3151,8 @@ if RUNALIGN or REALIGN:
 			elif alignmentPolicy == 'all':
 				parmstr += '-a '
 				sinparmstr += '-a '
+			# elif alignmentPolicy == '':
+			# this means default reporting of the best guess single alignment in bowtie2
 			
 		else:
 			parmstr = '--pairtries 300 '
@@ -2141,43 +3226,13 @@ if RUNALIGN or REALIGN:
 			UID = '%s-%s-%s'%(sampleID,run,lane)
 			if hashet and ALIGNTOOL != 'bowtie2': sys.exit('Heterozygous reference genome currently compatible with bowtie2 only. Use --tool bowtie2.')
 			
-			# find the file that is indicated in the map file
-			fastqFiles = sorted(getFiles(path, include=lane, exclude=['pdf','zip']))
-			
-			if paired:
-				# remove extraneous files that do not have the _1 or _2 in them
-				fastqFilesTmp = filter(lambda x: ('_1' in x or '_2' in x) and True, fastqFiles)
-				if not len(fastqFilesTmp):
-					fastqFiles = filter(lambda x: ('R1' in x or 'R2' in x) and True, fastqFiles)
-					del fastqFilesTmp
-				else:
-					fastqFiles = fastqFilesTmp
-				
-				# print 'test', fastqFiles
-				if len(fastqFiles) > 2:
-					print >> sys.stderr, 'Warning: Found more than 2 matching read files. Trying default s_lane_x_sequence.txt format.'
-					fastqFiles = [path+'s_%s_1_sequence.txt'%(lane), path+'s_%s_2_sequence.txt'%(lane)]
-				elif len(fastqFiles) < 2:
-					print >> sys.stderr, 'Skipping: Check read file names or path. Did not find 2 files for sample %s in path "%s": %s'%(lane, path, fastqFiles)
-					continue
-				
-				if not os.access(fastqFiles[0], os.F_OK) or not os.access(fastqFiles[1], os.F_OK): 
-					print >> sys.stderr, 'Skipping: could not find some raw read files. Check paths.'
-					continue
-			else:
-				if len(fastqFiles) > 2:
-					print >> sys.stderr, 'Warning: Found more than 2 matching read files. Trying default s_lane_x_sequence.fastq format.'
-					tmpfiles = ['s_%s_sequence'%(lane)]
-					fastqFiles = sorted(getFiles(path, include=tmpfiles, exclude=['pdf','bz2','zip']))
-					fastqFiles = filter(lambda x: '%s_1'%(lane) not in x and '%s_2'%(lane) not in x, fastqFiles)
-			
+			fastqFiles = rawfiles[sampleID]
+
 			# determine if fasta format
 			if len(fastqFiles) and ('.fasta' in fastqFiles[0]):
 				parmstr += ' -f'
 				sinparmstr += ' -f'
 			
-			try: rawfiles[sampleID] += fastqFiles
-			except KeyError: rawfiles[sampleID] = fastqFiles
 			
 			if ALIGNTOOL == 'bowtie2':
 				
@@ -2221,7 +3276,7 @@ if RUNALIGN or REALIGN:
 						if os.access(refGenome+'.fa', os.F_OK):
 							refGenomePlus = refGenome+'.fa'
 						elif os.access(refGenome+'.fasta', os.F_OK):
-							refGenomePlus = refGenome+'.fa'
+							refGenomePlus = refGenome+'.fasta'
 						else:
 							sys.exit('CANNOT ACCESS REFERENCE FILE.')
 					
@@ -2295,34 +3350,60 @@ if RUNALIGN or REALIGN:
 						# remove the partial files
 						os.system('rm -f "%s"'%(unm1))
 						os.system('rm -f "%s"'%(unm2))
-					else: # (Haploid reference genome)
+					else: # (Haploid reference genome, paired end reads)
 						# relax missing sequence
 						Nceiling = '0,0.15' # default value
-						
+						# first align reads to reference genome as paired end
 						call = '%sbowtie2 %s -N %s --n-ceil %s -p %s -x "%s" -1 "%s" -2 "%s" -S "%s" --un-conc "%s" 2>> "%s"'%(btdir,parmstr, umm, Nceiling, nsubprocs, refGenomeBase, fastqFiles[0], fastqFiles[1], btmapdir+UID+'.sam', unmapdir+UID+'.unmapped.fq', readMapPipeFile)
 						pipeit('- Mapping paired end data for %s...'%(UID))
 						pipeit(call,2,readMapPipe)
 						if not DRYRUN and (not os.access(btmapdir+UID+'.sam', os.F_OK) or REALIGN): os.system(call)
 						pipeit('done.',1)
 						
-						# now map unmapped reads as singletons - merge the two files
-						unm1 = "%s%s.unmapped.1.fq"%(unmapdir, UID); unm2 = "%s%s.unmapped.2.fq"%(unmapdir, UID)
-						unfun = "%s%s.unmapped.12.fq"%(unmapdir, UID)
-						pipeit('- Combining unmapped reads %s...'%(UID))
-						if not DRYRUN and os.access(unm2, os.F_OK) or REALIGN: 
-							# os.system('cat "%s" "%s" >> "%s"'%(unm1,unm2,unm))
-							os.system('cat "%s" >> "%s"'%(unm2,unm1))
-							os.system('mv "%s" "%s"'%(unm1,unfun))
-							# remove the partial files
-							os.system('rm -f "%s"'%(unm2))
-						pipeit('done.', 1)
 						
-						call = '%sbowtie2 %s -N %s --n-ceil %s -p %s %s -x "%s" -U "%s" -S "%s" --un "%s" 2>> "%s"'%(btdir, sinparmstr, umm, Nceiling, nsubprocs, BOWTIEFLAGS, refGenomeBase, unfun, btmapdir+UID+'.sr12.sam', unm, readMapPipeFile)
+						# take the unmapped paired reads and align using tophat to transcriptome
+						unm1 = "%s%s.unmapped.1.fq"%(unmapdir, UID); unm2 = "%s%s.unmapped.2.fq"%(unmapdir, UID)
+						unfun = unmapdir+UID+'.unmapped.12.fq'
+						if ALIGNTOTRANSCRIPTOME:
+							call = '%stophat2 -g %s %s --no-convert-bam --GTF "%s" -p %s -o "%s" "%s" "%s" "%s" 2>> "%s"'%(thdir, maxnumalign, TOPHATFLAGS, gfffile, nsubprocs, btmapdir+UID+'.tophat/', refGenomeBase, unm1, unm2, zdir+'read_mapping.log')
+							pipeit('- Mapping remaining paired end reads to transcriptome for %s...'%(UID))
+							pipeit(call,2,readMapPipe)
+							if not DRYRUN and (not os.access(btmapdir+UID+'.tophat/accepted_hits.sam', os.F_OK) or REALIGN): os.system(call)
+							# cat the tophat log output to master log
+							os.system('cat "%s" >> "%s"'%(btmapdir+UID+'.tophat/align_summary.txt', readMapPipeFile))
+							pipeit('done.',1)
+							
+							# sys.exit('HOLD FOR NOW - DEBUG')
+							# tophat returns a single unmapped reads file (unmapped.bam); convert this to fastq
+							# unm = unmapdir+UID+'.tophat.unmapped.fq'
+							call = 'bamToFastq -i "%s" -fq "%s"'%(btmapdir+UID+'.tophat/unmapped.bam', unfun)
+							pipeit('- Converting tophat unmapped file to fastq for %s...'%(UID))
+							pipeit(call,2,readMapPipe)
+							if not DRYRUN and (not os.access(unfun, os.F_OK) or REALIGN): os.system(call)
+							pipeit('done.',1)
+						else:
+							# no tophat; merge the 2 unmapped bowtie files and push through bowtie as singletons
+							# unfun = "%s%s.unmapped.12.fq"%(unmapdir, UID)
+							pipeit('- Combining _1 and _2 unmapped reads %s...'%(UID))
+							if not DRYRUN and os.access(unm2, os.F_OK) or REALIGN: 
+								# os.system('cat "%s" "%s" >> "%s"'%(unm1,unm2,unm))
+								os.system('cat "%s" >> "%s"'%(unm2,unm1))
+								os.system('mv "%s" "%s"'%(unm1,unfun))
+								# remove the partial files
+								os.system('rm -f "%s"'%(unm2))
+							pipeit('done.', 1)
+						
+						# FINISH THIS PART HERE - MAKE SURE BOTH RNA and regular are covered
+						# run tophat unmapped reads through bowtie once more
+						# unm = unmapdir+UID+'.remain.unmapped.singleton.fq'
+						call = '%sbowtie2 %s -N %s --n-ceil %s -p %s %s -x "%s" -U "%s" -S "%s" --un "%s" 2>> "%s"'%(btdir, sinparmstr, umm, Nceiling, nsubprocs, BOWTIEFLAGS, refGenomeBase, unfun, btmapdir+UID+'.singleton.sam', unm, readMapPipeFile)
+
 						pipeit('- Mapping remaining reads as singletons for %s...'%(UID))
 						pipeit(call,2,readMapPipe)
-						if not DRYRUN and (not os.access(btmapdir+UID+'.sr12.sam', os.F_OK) or REALIGN): os.system(call)
+						if not DRYRUN and (not os.access(btmapdir+UID+'.singleton.sam', os.F_OK) or REALIGN): os.system(call)
 						pipeit('done.',1)
 						
+
 						# remove the pre-unmapped file
 						# os.system('rm -f "%s"'%(unfun))
 						
@@ -2431,7 +3512,7 @@ if RUNALIGN or REALIGN:
 						
 						# map to transcriptome
 						if ALIGNTOTRANSCRIPTOME:
-							call = '%stophat2 -g %s %s --no-convert-bam --GTF "%s" -p %s -o "%s" "%s" "%s" 2>> "%s"'%(thdir, maxnumalign, TOPHATFLAGS, gfffile, nsubprocs, btmapdir+UID+'.tophat/', refGenome, unm, zdir+'read_mapping.log')
+							call = '%stophat2 -g %s %s --no-convert-bam --GTF "%s" -p %s -o "%s" "%s" "%s" 2>> "%s"'%(thdir, maxnumalign, TOPHATFLAGS, gfffile, nsubprocs, btmapdir+UID+'.tophat/', refGenomeBase, unm, zdir+'read_mapping.log')
 							pipeit('- Mapping single end reads to transcriptome for %s...'%(UID))
 							pipeit(call,2,readMapPipe)
 							if not DRYRUN and (not os.access(btmapdir+UID+'.tophat/accepted_hits.sam', os.F_OK) or REALIGN): os.system(call)
@@ -2486,7 +3567,7 @@ if RUNALIGN or REALIGN:
 						
 					createdir(btmapdir+'tophat-%s'%(UID))
 					if len(fastqFiles) == 0: sys.exit("no input files found. Exiting.")
-					call = '%stophat2 -g %s %s -p %s -o "%s" "%s" "%s" "%s" %s 2>> "%s"'%(thdir, maxnumalign, TOPHATFLAGS, nsubprocs, btmapdir+'tophat-%s'%(UID), refGenome, fastqFiles[0], fastqFiles[1], fragstr, zdir+'read_mapping.log')
+					call = '%stophat2 -g %s %s -p %s -o "%s" "%s" "%s" "%s" %s 2>> "%s"'%(thdir, maxnumalign, TOPHATFLAGS, nsubprocs, btmapdir+'tophat-%s'%(UID), refGenomeBase, fastqFiles[0], fastqFiles[1], fragstr, zdir+'read_mapping.log')
 				
 				
 				pipeit('- Mapping paired end data for %s...'%(UID),1)
@@ -2530,7 +3611,7 @@ if RUNALIGN or REALIGN:
 				elif ALIGNTOOL == 'tophat2':
 					createdir(btmapdir+'tophat-%s'%(UID))
 					# datstr = ' '.join(['"%s"'%(fqf) for fqf in fastqFiles])
-					call = '%stophat2 -g %s %s -p %s -o "%s" "%s" "%s" 2>> "%s"'%(thdir, maxnumalign, TOPHATFLAGS, nsubprocs, btmapdir+'tophat-%s'%(UID), refGenome, fastqFiles[0], zdir+'read_mapping.log')
+					call = '%stophat2 -g %s %s -p %s -o "%s" "%s" "%s" 2>> "%s"'%(thdir, maxnumalign, TOPHATFLAGS, nsubprocs, btmapdir+'tophat-%s'%(UID), refGenomeBase, fastqFiles[0], zdir+'read_mapping.log')
 					
 				if COLORSPACE:
 					
@@ -2560,13 +3641,9 @@ if RUNALIGN or REALIGN:
 			
 		print '- DONE', sampleID
 	
-	# save mapping of raw reads to sampleIDs to file
-	tab = [[k]+rawfiles[k] for k in sorted(rawfiles.keys())]
-	printTable(tab,file=zdir+'readFilesToSampleIDs.txt',ioMethod='a')
-	
 	print '=> Done read mapping for all specified samples.'
 	print
-	if not ORGANIZEREADS and not LIKCALLING and not PEAKCALLING and not JOINPIECES:
+	if not ORGANIZEREADS and not LIKCALLING and not PEAKCALLING and not JOINPIECES and not ALIGNTOTRANSCRIPTOME and not RUNCUFFLINKS:
 		sys.exit('=> Done for now. Use the -O and -index flags to compute organize and index read maps for downstream analysis.')
 	
 
@@ -2580,7 +3657,7 @@ if COUNTREADS:
 	chromlengths = dict( map(lambda k: (k, len(G[k]['seq'])), G) )
 	master_chroms = chromlengths.keys()
 	
-	readbphead = ['SampleID', 'Run', 'Lane', 'PE', 'Reads', 'Bases', 'Coverage']
+	readbphead = ['SampleID', 'Filename', 'Lane', 'PE', 'Reads', 'Bases', 'Coverage']
 	readbptab = []
 	readlen = 40
 	print 'Computing number of reads for samples...'
@@ -2605,7 +3682,7 @@ if COUNTREADS:
 	
 	# remaining is deprecated - organize reads returns mapped totals
 	
-	mapreadshead = ['SampleID', 'Run', 'Lane', 'PE Reads', 'Rem Singletons', 'PE Bases', 'Rem Singleton Bases', 'PE Coverage', 'Rem Sing. Cov.']
+	mapreadshead = ['SampleID', 'Filename', 'Lane', 'PE Reads', 'Rem Singletons', 'PE Bases', 'Rem Singleton Bases', 'PE Coverage', 'Rem Sing. Cov.']
 	mapreadstab = []
 	
 	# count up number of mapped reads and bases
@@ -2715,19 +3792,17 @@ if ORGANIZEREADS:
 		rawfiles = dict([(r[i],map(lambda x: x.strip(), d[i])) for i in range(len(d))])
 	
 	# touch new summary tables
-	pmafile = zdir+'Summary-Perfect vs mismatch alignments%s.txt'%(ubamap)
-	if not os.access(pmafile, os.F_OK) or REORGANIZEREADS:
-		header=['Sample', 'Diploid', 'Total reads', 'Mapped reads', 'Proportion reads mapped', 'Mapped alignments', 'Perfect alignments', 'Mismatched alignments', 'Total alignments', 'Frac perfect', 'Frac mismatch', 'Avg mismatch/aln', 'Alns w/mismatch']
+	pmafile = zdir+'QC_alignment_mismatches%s.txt'%(ubamap)
+	if not os.access(pmafile, os.F_OK):
+		header=['Sample', 'Files', 'Diploid', 'Total reads', 'Mapped reads', 'Proportion reads mapped', 'Mapped alignments', 'Perfect alignments', 'Mismatched alignments', 'Total alignments', 'Frac perfect', 'Frac mismatch', 'Avg mismatch/aln', 'Alns w/mismatch', 'Aln multiplicity', 'Deg alns/read']
 		record('\t'.join(header), pmafile, 'w')
 	
-	almfile = zdir+'Summary-alignment multiplicity%s.txt'%(ubamap)
-	if not os.access(almfile, os.F_OK) or REORGANIZEREADS:
+	almfile = zdir+'QC_alignment_multiplicity%s.txt'%(ubamap)
+	if not os.access(almfile, os.F_OK):
 		record('Sample: SE and PE multiplicity distributions (alignments, reads)', almfile, 'w')
 	
-	if not os.access(crdfile, os.F_OK) or REORGANIZEREADS:
+	if not os.access(crdfile, os.F_OK):
 		record('SampleID\tDiploid\tChrom\tUnique SE\tUnique PE\tNon-unique SE\tNon-unique PE', crdfile, 'w')
-	
-	
 	
 	currentsample = 0
 	for sampleID in sorted(seqRuns.keys()):
@@ -2863,8 +3938,8 @@ if ORGANIZEREADS:
 						pipeit('done.',1)
 						
 						pipeit('- Sorting merged readmap...')
-						os.system('sort -k 1,1 -S 50% -T "%s" "%s" > "%s"'%(outdir, btmapdir+UID+'.h1.merge.sam', btmapdir+UID+'.h1.sorted.sam'))
-						os.system('sort -k 1,1 -S 50% -T "%s" "%s" > "%s"'%(outdir, btmapdir+UID+'.h2.merge.sam', btmapdir+UID+'.h2.sorted.sam'))
+						os.system('sort -k 1,1 -S 50% --parallel=%s -T "%s" "%s" > "%s"'%(nsubprocs, outdir, btmapdir+UID+'.h1.merge.sam', btmapdir+UID+'.h1.sorted.sam'))
+						os.system('sort -k 1,1 -S 50% --parallel=%s -T "%s" "%s" > "%s"'%(nsubprocs, outdir, btmapdir+UID+'.h2.merge.sam', btmapdir+UID+'.h2.sorted.sam'))
 						
 						if not REORGANIZEREADS and not KEEPBOWTIE: 
 							os.system('rm -f "%s"'%(btmapdir+UID+'.h1.merge.sam'))
@@ -2912,14 +3987,14 @@ if ORGANIZEREADS:
 								pipeit('done.',1)
 								
 								pipeit('- Sorting merged readmap...')
-								os.system('sort -k 1,1 -S 50%'+' -T "%s" "%s" > "%s"'%(outdir, btmapdir+UID+'.merge.sam', btmapdir+UID+'.sorted.sam'))
+								os.system('sort -k 1,1 -S 50%'+' --parallel=%s -T "%s" "%s" > "%s"'%(nsubprocs, outdir, btmapdir+UID+'.merge.sam', btmapdir+UID+'.sorted.sam'))
 								if not REORGANIZEREADS and not KEEPBOWTIE: 
 									# os.system('rm -f "%s"'%(btmapdir+UID+'.sam'))
 									os.system('rm -f "%s"'%(btmapdir+UID+'.merge.sam'))
 								pipeit('done.',1)
 							else:
 								if len(ITER_TRIM): pipeit('- Merging haploid and diploid and trimmed readmaps...')
-								else: pipeit('- Merging haploid and diploid readmaps...')
+								# else: pipeit('- Merging haploid and diploid readmaps...')
 								
 								if not len(ITER_TRIM) and not ALIGNTOTRANSCRIPTOME:
 									# haploid file is the one samfile we have; just rename
@@ -2928,8 +4003,8 @@ if ORGANIZEREADS:
 									os.system('cp "%s" "%s"'%(btmapdir+UID+'.sam',btmapdir+UID+'.merge.sam'))
 									
 									if paired:
-										os.system('cat "%s" >> "%s"'%(btmapdir+UID+'.sr12.sam',btmapdir+UID+'.merge.sam'))
-										if not REORGANIZEREADS and not KEEPBOWTIE: os.system('rm -f "%s"'%(btmapdir+UID+'.sr12.sam'))
+										os.system('cat "%s" >> "%s"'%(btmapdir+UID+'.singleton.sam',btmapdir+UID+'.merge.sam'))
+										if not REORGANIZEREADS and not KEEPBOWTIE: os.system('rm -f "%s"'%(btmapdir+UID+'.singleton.sam'))
 										
 									if ALIGNTOTRANSCRIPTOME:
 										# merge genome and transcriptome maps
@@ -2944,7 +4019,7 @@ if ORGANIZEREADS:
 										if not REORGANIZEREADS and not KEEPBOWTIE: os.system('rm -f "%s"'%(newf))
 										
 									pipeit('- Sorting merged readmap...')
-									os.system('sort -k 1,1 -S 50%'+' -T "%s" "%s" > "%s"'%(outdir, btmapdir+UID+'.merge.sam', btmapdir+UID+'.sorted.sam'))
+									os.system('sort -k 1,1 -S 50%'+' --parallel=%s -T "%s" "%s" > "%s"'%(nsubprocs, outdir, btmapdir+UID+'.merge.sam', btmapdir+UID+'.sorted.sam'))
 									if not REORGANIZEREADS and not KEEPBOWTIE: os.system('rm -f "%s"'%(btmapdir+UID+'.merge.sam'))
 									pipeit('done.',1)
 									
@@ -2979,7 +4054,7 @@ if ORGANIZEREADS:
 				
 				if EXOSORT:
 					pipeit('- Sorting external readmap...')
-					os.system('sort -k 1,1 -S 50%'+' -T "%s" "%s" > "%s"'%(outdir, qfile, qsfile))
+					os.system('sort -k 1,1 -S 50%'+' --parallel=%s -T "%s" "%s" > "%s"'%(nsubprocs, outdir, qfile, qsfile))
 					if not REORGANIZEREADS and not KEEPBOWTIE: os.system('rm -f "%s"'%(qfile))
 					pipeit('done.',1)
 				else:
@@ -3611,7 +4686,7 @@ if ORGANIZEREADS:
 				fdeg = {'SE':stmp, 'PE':stmp}
 				
 				pipeit('- Sorting %s...'%(getFilename(funi['SE'])))
-				os.system('sort -k 3,3 -k 4,4n -S 50%'+' "%s" > "%s"'%(funi['SE'], funi['SE']+'.sorted'))
+				os.system('sort -k 3,3 -k 4,4n -S 50%'+' --parallel=%s "%s" > "%s"'%(nsubprocs, funi['SE'], funi['SE']+'.sorted'))
 				os.system('mv "%s" "%s"'%(funi['SE']+'.sorted', funi['SE']))
 				
 				# DONE SORTING
@@ -3641,7 +4716,7 @@ if ORGANIZEREADS:
 				fdeg = {'SE':stmp, 'PE':stmp}
 				
 				pipeit('- Sorting %s...'%(getFilename(funi['SE'])))
-				os.system('sort -k 3,3 -k 4,4n -S 50%'+' -T "%s" "%s" > "%s"'%(outdir, funi['SE'], funi['SE']+'.sorted'))
+				os.system('sort -k 3,3 -k 4,4n -S 50%'+' --parallel=%s -T "%s" "%s" > "%s"'%(nsubprocs, outdir, funi['SE'], funi['SE']+'.sorted'))
 				os.system('mv "%s" "%s"'%(funi['SE']+'.sorted', funi['SE']))
 				pipeit('done.',1)
 			
@@ -3652,7 +4727,7 @@ if ORGANIZEREADS:
 				fdeg = {'SE':stmp, 'PE':stmp}
 			
 				pipeit('- Sorting %s...'%(getFilename(funi['SE'])))
-				os.system('sort -k 3,3 -k 4,4n -S 50%'+' -T "%s" "%s" > "%s"'%(outdir, funi['SE'], funi['SE']+'.sorted'))
+				os.system('sort -k 3,3 -k 4,4n -S 50%'+' --parallel=%s -T "%s" "%s" > "%s"'%(nsubprocs, outdir, funi['SE'], funi['SE']+'.sorted'))
 				os.system('mv "%s" "%s"'%(funi['SE']+'.sorted', funi['SE']))
 				pipeit('done.',1)
 			
@@ -3663,7 +4738,7 @@ if ORGANIZEREADS:
 			
 				for pese in ['SE','PE']:
 					pipeit('- Sorting %s...'%(getFilename(funi[pese])))
-					os.system('sort -k 3,3 -k 4,4n -S 50%'+' -T "%s ""%s" > "%s"'%(outdir, funi[pese], funi[pese]+'.sorted'))
+					os.system('sort -k 3,3 -k 4,4n -S 50%'+' --parallel=%s -T "%s ""%s" > "%s"'%(nsubprocs, outdir, funi[pese], funi[pese]+'.sorted'))
 					os.system('mv "%s" "%s"'%(funi[pese]+'.sorted', funi[pese]))
 					pipeit('done.',1)
 			# DONE SORTING
@@ -3724,11 +4799,16 @@ if ORGANIZEREADS:
 		# report total reads for this sample
 		lst = []
 		totalcount = 0
-		if sampleID not in rawfiles or len(filter(lambda x: getSuffix(x) in ['bz2', 'gz','zip'], rawfiles[sampleID])): 
+		if sampleID not in rawfiles:
 			pipeit('Warning: will not obtain total raw reads for sample %s.'%(sampleID),1)
+		# elif len(filter(lambda x: getSuffix(x) in ['bz2', 'gz','zip'], rawfiles[sampleID])):
 		else:
 			for f in rawfiles[sampleID]:
-				os.system('wc -l "%s" > "%s"'%(f,zdir+'tmpfile.txt'))
+				if getSuffix(f) in ['bz2', 'gz','zip']:
+					os.system('zcat "%s" | wc -l > "%s"'%(f,zdir+'tmpfile.txt'))
+				else:
+					os.system('wc -l "%s" > "%s"'%(f,zdir+'tmpfile.txt'))
+				
 				count = 0
 				try:
 					info = readList(zdir+'tmpfile.txt')[0].strip().split(' ')
@@ -3742,6 +4822,9 @@ if ORGANIZEREADS:
 		record('%s\tTotal'%(totalcount),recfile,'a')
 		os.system('rm -f "%s"'%(zdir+'tmpfile.txt'))
 		
+		hdkeepm = []
+		hdkeepd = []
+
 		row = []
 		for hd in hds:
 			# move on to next group if there are no mapped reads
@@ -3762,13 +4845,9 @@ if ORGANIZEREADS:
 			row += ['%s: There are %s/%s (%s) mismatched (<%s/%s) alignments'%(hd, npmms[hd],nrows[hd],mmfrac,maxreadlen,maxreadlen)]
 			row += ['Avg mismatches/alignment = %s'%(meanmm)]
 			
-			print hqmms[hd]
+			# print hqmms[hd]
 			hqstr = ','.join(['%s:%s'%(k,roundna(4)(divna(hqmms[hd][k],nrows[hd]))) for k in sorted(hqmms[hd].keys())])
 			if not hqstr: hqstr = nastr
-			
-			# save perfect/mismatch reads summary
-			info = '\t'.join(map(str, [sampleID, hd, totalcount, totreads[hd]['Total'], roundna(4)(divna(totreads[hd]['Total'],totalcount)), totaln[hd]['Total'], nper, npmms[hd], nrows[hd], roundna(4)(perfrac), roundna(4)(mmfrac), roundna(4)(meanmm), hqstr]))
-			record(info, pmafile, 'a')
 			
 			# save read and multiplicity statistics
 			sestr = ', '.join('('+','.join(map(str,p))+')' for p in sorted(sidHist[hd]['SE'].items()))
@@ -3800,10 +4879,21 @@ if ORGANIZEREADS:
 			# raise exception if no reads in map
 			try: new = reHist(hist,newbins, freq=1)
 			except ValueError: new = zip(newbins,[0 for z in newbins])
-			new = '\t'.join(map(lambda x: str(round(x[1],5)), new))
-			record('     Summary: '+new, recfile, 'a')
+			newstr = '\t'.join(map(lambda x: str(round(x[1],5)), new))
+			record('     Summary: '+newstr, recfile, 'a')
 			sapr = divna(ttotaln,ttotreads)
 			record('Deg aln/read: %s'%(sapr), recfile, 'a')
+			
+			# add summary to summary QC file
+			tmpstr = ';'.join(map(lambda x: '%s:%s'%(x[0],x[1]), zip(newbins , map(lambda x: str(round(x[1],5)), new))))
+			hdkeepm += [tmpstr]
+			hdkeepd += [str(sapr)]
+
+		# save perfect/mismatch reads summary
+		info = '\t'.join(map(str, [sampleID, ';'.join(map(getFile, rawfiles[sampleID])), hd, totalcount, totreads[hd]['Total'], roundna(4)(divna(totreads[hd]['Total'],totalcount)), totaln[hd]['Total'], nper, npmms[hd], nrows[hd], roundna(4)(perfrac), roundna(4)(mmfrac), roundna(4)(meanmm), hqstr, ' '.join(hdkeepm), ' '.join(hdkeepd)]))
+		record(info, pmafile, 'a')
+			
+
 			# ---------------------------------------------------
 		record('', recfile, 'a')
 		del sidHist # clean up
@@ -3953,7 +5043,7 @@ if ALIGNTOTRANSCRIPTOME:
 							mergeSamFiles([utmp,dtmp],outfile=ntmp)
 						# now must sort for cufflinks
 						pipeit('sorting,')
-						os.system('sort -k 3,3 -k 4,4n -S 50%'+' "%s" > "%s"'%(ntmp,ntmps))
+						os.system('sort -k 3,3 -k 4,4n -S 50%'+' --parallel=%s "%s" > "%s"'%(nsubprocs, ntmp,ntmps))
 						os.system('rm -f "%s"'%(ntmp))
 					# cat the header
 					os.system('cat "%s" "%s" > "%s"'%(samheaderfile, ntmps, ntmph))
@@ -3991,7 +5081,7 @@ if ALIGNTOTRANSCRIPTOME:
 						mergeSamFiles([utmp,dtmp],outfile=ntmp)
 					# now must sort by position for cufflinks
 					pipeit('sorting,')
-					os.system('sort -k 3,3 -k 4,4n -S 50%'+' "%s" > "%s"'%(ntmp,ntmps))
+					os.system('sort -k 3,3 -k 4,4n -S 50%'+' --parallel=%s "%s" > "%s"'%(nsubprocs, ntmp,ntmps))
 					os.system('rm -f "%s"'%(ntmp))
 				# cat the header
 				os.system('cat "%s" "%s" > "%s"'%(samheaderfile, ntmps, ntmph))
@@ -4016,12 +5106,20 @@ if RUNCUFFLINKS:
 	for sampleID in sorted(seqRuns.keys()):
 		fraglen = fragDiameter4Sample[sampleID]
 		
+		RG = []
 		LT = []
+
 		for run,lane in seqRuns[sampleID].keys():
 			refGenome,hashet,paired,path = seqRuns[sampleID][(run,lane)][:4]
+			RG += [refGenome]
 			# print 'items', seqRuns[sampleID][(run,lane)]
 			LT += [seqRuns[sampleID][(run,lane)][-1]]
 		LT = unique(LT)
+
+		RG = unique(RG)
+		if len(RG) > 1: sys.exit('Multiple reference genomes provided. Use -r to specify one file or update mapfile.\n%s'%(RG))
+		refGenome = RG[0]
+
 		if len(LT) > 1:
 			sys.exit('mixing libraries of multiple chemistries: %s'%(LT))
 		libtype = LT[0]
@@ -4040,7 +5138,7 @@ if RUNCUFFLINKS:
 			
 			if not DRYRUN and (not os.access(cuffdir2+'isoforms.fpkm_tracking', os.F_OK) or REDOCUFFLINKS):
 				# find refGenome suffix
-				refGenomeFull = None
+				refGenomeFull = refGenome
 				if not os.access(refGenome,os.F_OK):
 					candidates = getFiles(getPath(refGenome),include=getLabel(refGenome))
 					final = filter(lambda x: x in [refGenome+'.fasta',refGenome+'.fa'], candidates)
@@ -4048,6 +5146,8 @@ if RUNCUFFLINKS:
 					if len(final) > 1:
 						pipeit('Warning: multiple reference genomes found: %s. Using the first entry.'%(final),1)
 					refGenomeFull = final[0]
+				if refGenomeFull == None:
+					sys.exit('ERROR --cufflinks no reference genome provided. Use -r flag.\n')
 					
 				options = '-o "%s" -p %s -m %s --library-type %s -b "%s" %s'%(cuffdir2,nsubprocs,fraglen,libtype,refGenomeFull,CUFFLINKSFLAGS)
 				if gfffile: options += ' --GTF "%s"'%(gfffile)
@@ -4075,7 +5175,7 @@ if RUNCUFFLINKS:
 		try:
 			d,r,c = readTable(outfile,rownames=0)
 			idx = c.index('FPKM')
-			fpkm = [(row[0],row[idx]) for row in d]
+			fpkm = [(row[0],row[idx]) for row in d if len(row) >= idx]
 			pairs += [fpkm]
 			labels += [sampleID]
 		except IOError: pass
@@ -4133,7 +5233,7 @@ if INDEXMAPFILES or INDEXUNI:
 					if not INDEXONLY:
 						# os.system('mv "%s" "%s"'%(base, base+'.unsort'))
 						# os.system('sort -k 3,3 -k 4,4n "%s" > "%s"'%(base+'.unsort', base))
-						os.system('sort -k 3,3 -k 4,4n -S 50%'+'-T "%s" "%s" > "%s"'%(outdir, base, base+'.sorted'))
+						os.system('sort -k 3,3 -k 4,4n -S 50%'+' --parallel=%s -T "%s" "%s" > "%s"'%(nsubprocs, outdir, base, base+'.sorted'))
 						os.system('mv "%s" "%s"'%(base+'.sorted', base))
 						# os.system('rm -f "%s"'%(base+'.unsort')) # let user delete these
 					
@@ -4298,8 +5398,8 @@ for sampleID in sampleIDs:
 	if aka[0] == 'ptm': ptmsample = sampleID
 	elif aka[0] == 'inp': inpsample = sampleID
 	elif aka[0] == 'nuc': nucsample = sampleID
-	elif aka[0] == 'atac': nucsample = sampleID
-	elif aka[0] == 'atacinp': inpsample = sampleID
+	elif aka[0] == 'atac' or aka[0] == 'dnase': nucsample = sampleID
+	elif aka[0] == 'atacinp' or aka[0] == 'dnaseinp': inpsample = sampleID
 
 if inpsample == 'input': inpsample == 'inp'
 
@@ -4412,7 +5512,12 @@ if LIKCALLING:
 	
 	# if len(sampleIDs)==1 and nsubprocs > 1: xflag = 'subchrom'
 	
+	# EX: -rest chrY -x 10
+	if len(seqbounds.keys()) == 1 and nsubprocs > 1: xflag = 'subchrom'
+	# print 'TEST', xflag, 'threads', nsubprocs; sys.exit()
+
 	# sampleIDs accounts for --ids if user supplied them
+	NUM_IDS_TO_PROCESS = 0
 	for sampleID in sampleIDs:
 		dsampleID = ALLELESPECIFIC and '.'.join(sampleID.split('.')[:-1]) or sampleID
 		if not bfaref: bfaref = seqRuns[dsampleID].values()[0][0]
@@ -4429,7 +5534,9 @@ if LIKCALLING:
 		print '- Computing likelihoods for', sampleID, 'against', getLabel(bfaref)
 		
 		# check if output file exists before rescheduling
-		if REDOLIKCALLING or not os.access(resdir+sampleID+'.mother'+boundslabel+'.txt', os.F_OK):
+		# print 'LOOKING', resdir+sampleID+'.mother.txt', os.access(resdir+sampleID+'.mother.txt', os.F_OK)
+		# sys.exit()
+		if REDOLIKCALLING or (not os.access(resdir+sampleID+'.mother'+boundslabel+'.txt', os.F_OK) and not os.access(resdir+sampleID+'.mother.txt', os.F_OK)):
 			# set up jobs
 			
 			thislogdir = logdir+'%s.logs/'%(sampleID); createdir(thislogdir)
@@ -4477,14 +5584,16 @@ if LIKCALLING:
 				idstr = ' --sampleid %s '%(sampleID)
 				cPID = sampleID
 				asstr = ALLELESPECIFIC and '-as' or ''
-				call = '%s %s --pid "%s" --ref "%s" --m "%s" -i "%s" -o "%s" --key "%s" --d %s%s --rl %s --expphred %s --lambda %s --diameter %s %s %s %s'%(python, glpath,cPID, bfaref, mapfile, btmapdir, outdir, zkey, maxnumalign, remstr, maxreadlen, expPhred, Lambda, fragDiameter4Sample[dsampleID], ssstr, idstr, asstr)
-			
+
+				call = '%s %s --pid "%s" --m "%s" -i "%s" -o "%s" --key "%s" --d %s%s --rl %s --expphred %s --lambda %s --diameter %s %s %s %s'%(python, glpath, cPID, mapfile, btmapdir, outdir, zkey, maxnumalign, remstr, maxreadlen, expPhred, Lambda, fragDiameter4Sample[dsampleID], ssstr, idstr, asstr)
+				
+				if not HUGLY: call += ' --ref "%s"'%(bfaref)
 				if USESWALLOW: call = '%s %s'%(swallowpath, call)
 				if DEGREADSTREAM: call += ' --stream --buffer %s'%(bufferlimit)
 				if not REDUNDANCYFILTER: call += ' --nopcr'
 				else: call += ' --pcrdir "%s"'%(badReadDir)
 				if PESECOMBO: call += ' --combo'
-				if USESGE: call += ' --pythonpath "%s"'%(PYTHONPATH)
+				if USESGE: call += ' --pythonpath "%s"'%(SGEPYTHONPATH)
 				
 				# continue to break up each chromosome into pieces
 				# this is straightforward if we are not using SGE, so start with local multiprocessing
@@ -4508,19 +5617,27 @@ if LIKCALLING:
 						# print 'P', achr, pieces, chrmlen[achr]
 						for p in pieces: chromgroups += [[achr]+list(p)]
 					
-				pipeit(' - Automatically distributing into --x %s jobs x %s chromosomes x %s sampleIDs = %s jobs...'%(npieces,len(copydir),len(sampleIDs), npieces*len(copydir)*len(sampleIDs)),1)
+				pipeit('- Automatically distributing into --x %s jobs x %s chromosomes = %s jobs...'%(npieces,len(copydir), npieces*len(copydir)),1)
 				
 				# generate a job per chromosome interval
 				for achr,start,stop in chromgroups:
 					boundslabeltmp = '%s,%s,%s'%(achr,start,stop)
 					boundstr = ' --rest %s'%(boundslabeltmp)
 					logstr = ' >> "%s"'%(thislogdir+'%s_%s_%s.log'%(sampleID,boundslabeltmp,tmpstr))
-					pipeit('   Call %s: %s'%(cct, call+boundstr+logstr),1)
-					jobs += [call+boundstr+logstr]
+					
+					refstr = ''
+					if HUGLY:
+						if achr in bounds2Ref: 
+							refstr = ' --ref "%s"'%(bounds2Ref[achr])
+						else:
+							refstr = ' --ref "%s"'%(bfaref)
+					
+					if VERBOSE: pipeit('   Call %s: %s'%(cct, call+refstr+boundstr+logstr),1)
+					jobs += [call+refstr+boundstr+logstr]
 					cct += 1
 			
 			else:
-				pipeit(' - Automatically distributing into -x %s jobs per sampleID (%s sampleIDs)...'%(npieces,len(sampleIDs)),1)
+				pipeit('- Automatically distributing into -x %s jobs per sampleID (%s sampleIDs)...'%(npieces,len(sampleIDs)),1)
 				
 				restdir = zdir+'boundsfiles/'
 				createdir(restdir)
@@ -4562,7 +5679,7 @@ if LIKCALLING:
 						boundstr = '--rest "%s"'%(boundsfiletmp)
 						if not len(boundsfiletmp): boundstr = ''
 						
-					elif xflag == 'bychrom':
+					elif nsubprocs > 1 and xflag == 'bychrom':
 						# len(chromgrp) == 1 for this case
 						boundstr = '--rest "%s"'%(chromgrp[0].strip())
 						cPID += '.'+chromgrp[0].strip()
@@ -4572,7 +5689,8 @@ if LIKCALLING:
 						boundstr = '--rest "%s"'%(boundsfile)
 						cPID += boundslabel
 					
-					
+					# print xflag, "SDFL:KJSDLKJSFD', boundstr", boundstr, xflag
+					# sys.exit()
 					# before adding this as a job, just check to see if it is already completed
 					if not REDOLIKCALLING and os.access(resdir+sampleID+'.mother.'+chromgrp[0].strip()+'.txt', os.F_OK): 
 						pipeit('Done %s, '%(cPID))
@@ -4587,18 +5705,23 @@ if LIKCALLING:
 					if not REDUNDANCYFILTER: call += ' --nopcr'
 					else: call += ' --pcrdir "%s"'%(badReadDir)
 					if PESECOMBO: call += ' --combo'
-					if USESGE: call += ' --pythonpath "%s"'%(PYTHONPATH)
+					if USESGE: call += ' --pythonpath "%s"'%(SGEPYTHONPATH)
 					
 					logstr = ' > "%s"'%(thislogdir+'%s.log'%(cPID))
-					pipeit('\n   Call %s: %s'%(cct, call+logstr),1)
+					if VERBOSE: pipeit('\n   Call %s: %s'%(cct, call+logstr),1)
 					jobs += [call+logstr]
 					cct += 1
 	
+			NUM_IDS_TO_PROCESS += 1
 		else:
 			pipeit('Already finished '+sampleID+'.mother'+boundslabel+'.txt',1)
 	# if not len(jobs) and : sys.exit('- No jobs to schedule. Exiting...')
 	
 	if len(jobs):
+		pipeit('- Now launching a total of %s jobs using %s parallel threads.'%(len(jobs),nsubprocs),1)
+		pipeit('- Results will be saved to "%s".'%(loglikfile),1)
+		printList(jobs,delim='\n\n',file=loglikfile) # save to log file
+		
 		# set up 
 		# if os.access(completedir, os.F_OK) and len(getFiles(completedir)) > 0:
 			# os.system('rm -f "%slikelihood"*'%(completedir))
@@ -4651,7 +5774,8 @@ if LIKCALLING:
 					time.sleep(1)
 	
 			if not KEEPALIVE and njobs > 1 and nsubprocs > 1:
-				sys.exit('\n- Likelihood processes have been launched. Check log_files/ directory to monitor progress.\nWhen jobs have finished, execute glimmrHet.py with --merge[+] <sample1,...,samplek>\nto merge partial files into complete likelihood files.\nThen use the -p flag to compute posterior probabilities.')
+				sys.exit('\n- Likelihood processes have been launched. Check log_files/ directory to monitor progress.\n- Or run glimmrChecklist.py -i <output_dir>/log_files/<sampleID>.logs/')
+				# When jobs have finished, execute glimmrHet.py with --merge[+] <sample1,...,samplek>\nto merge partial files into complete likelihood files.\nThen use the -p flag to compute posterior probabilities.
 			else:
 				for job in running_jobs: job.wait() # halt code until all jobs are finished.
 	
@@ -4659,47 +5783,76 @@ if LIKCALLING:
 
 
 # rejoin subchrom pieces
-if JOINPIECES and xflag == 'subchrom':
+if JOINPIECES:# and xflag == 'subchrom':
 	pipeit('- Joining subchrom likelihood pieces...',1)
+	JOINFLAG = False
 	for sampleID in sampleIDs:
 		pipeit('  %s...'%(sampleID))
 		# figure out the files
-		copydir = getChromsFromHeader(btmapdir+sampleID+'.SE.unique.map').keys()
+		tmpmap = btmapdir+sampleID+'.unique.map'
+		if PESECOMBO: tmpmap = btmapdir+sampleID+'.unique.map'
+		elif USESINGLETONS: tmpmap = btmapdir+sampleID+'.SE.unique.map'
+		else: tmpmap = btmapdir+sampleID+'.PE.unique.map'
+
+		copydir = getChromsFromHeader(tmpmap).keys()
 		if len(seqbounds): copydir = seqbounds.keys()
 		
 		chromfiles = ['%s.mother.%s.txt'%(sampleID,achr) for achr in sorted(copydir)]
-		
-		for achr in sorted(copydir):
-			pipeit('%s,'%(achr))
-			motherfile = '%s.mother.%s.txt'%(sampleID,achr)
-			chrpieces = getFiles(resdir,include='%s.mother.%s'%(sampleID,achr), exclude=chromfiles)
-			
-			if os.access(resdir+motherfile, os.F_OK) and len(chrpieces)==0: continue
-			elif len(chrpieces) == 0: sys.exit('No files with prefix %s.mother.%s'%(sampleID,achr))
-			
-			# put these into sorted order - by chrom then by position
-			parts = map(lambda x: [int(x.split('/')[-1].split('.')[2].split(',')[1]),x], chrpieces)
-			
-			chrmother = resdir+'%s.mother.%s.txt'%(sampleID,achr)
-			fh = open(chrmother,'w'); fh.close()
-			
-			for start,piece in sorted(parts):
-				# print 'concatenating', piece.split('/')[-1]
-				os.system('cat "%s" >> "%s"'%(piece,chrmother))
-				# os.system('rm "%s"'%(piece))
-		
-		pipeit('final merge...')
-		# merge chromosomes into single file
 		finalfile = resdir+'%s.mother.txt'%(sampleID)
-		fh = open(finalfile,'w'); fh.close()
-		for achr in sorted(copydir):
-			chromfile = '%s%s.mother.%s.txt'%(resdir,sampleID,achr)
-			os.system('cat "%s" >> "%s"'%(chromfile, finalfile))
-			os.system('rm -f "%s"'%(chromfile))
-		pipeit('done',1)
-		
+		if not os.access(finalfile, os.F_OK):
+			for achr in sorted(copydir):
+				pipeit('%s,'%(achr))
+				motherfile = '%s.mother.%s.txt'%(sampleID,achr)
+				chrpieces = getFiles(resdir, include='%s.mother.%s,'%(sampleID,achr), exclude=chromfiles)
+				
+				if os.access(resdir+motherfile, os.F_OK) and len(chrpieces)==0: continue
+				elif len(chrpieces) == 0: 
+					pipeit('No files with prefix %s.mother.%s,'%(sampleID,achr),1)
+					JOINFLAG = True
+					continue
+				
+				# put these into sorted order - by chrom then by position
+				# parts = map(lambda x: [int(x.split('/')[-1].split('.')[2].split(',')[1]),x], chrpieces)
+				# print 'PARTS', printTable(sorted(parts))
+				parts = map(lambda x: [int(x.split('/')[-1].split('.')[-2].split(',')[1]),x], chrpieces)
+				# print 'NEW PARTS', printTable(sorted(newparts))
+				# print 'TESTING', sorted(parts) == sorted(newparts)
+				# sys.exit()
+				chrmother = resdir+'%s.mother.%s.txt'%(sampleID,achr)
+				fh = open(chrmother,'w'); fh.close()
+				
+				tmpfiles = []
+				for start,piece in sorted(parts):
+					# print 'concatenating', piece.split('/')[-1]
+					os.system('cat "%s" >> "%s"'%(piece,chrmother))
+					tmpfiles += [piece]
+				
+				# if CLEANJOINPIECES:
+				# do this always
+				for tmpf in tmpfiles: os.system('rm -f "%s"'%(tmpf))
+			
+			if FORCEJOIN: JOINFLAG = False
+			if len(copydir) > 1 and not JOINFLAG:
+				pipeit('- Final merge...')
+				# merge chromosomes into single file
+				
+				fh = open(finalfile,'w'); fh.close()
+				tmpfiles = []
+				for achr in sorted(copydir):
+					chromfile = '%s%s.mother.%s.txt'%(resdir,sampleID,achr)
+					os.system('cat "%s" >> "%s"'%(chromfile, finalfile))
+					tmpfiles += [chromfile]
+				if CLEANJOINPIECES:
+					for tmpf in tmpfiles: os.system('rm -f "%s"'%(tmpf))
+				pipeit('done',1)
+		else:
+			pipeit('already done',1)
 	pipeit('- Finished merging the "--subchrom" mother likelihood files',1)
-	pipeit('- NB, you must manually delete the partial likelihood files (samplex.mother.chrx.start,stop,+.txt).',1)
+	pipeit('- Results saved to "%s"'%(resdir),1)
+	if JOINFLAG:
+		pipeit('- Did not merge chrom files into final mother file due to potential missing files. Use -forcejoin to override.')
+	if not CLEANJOINPIECES:
+		pipeit('- NB, you can now manually delete the partial likelihood files (samplex.mother.chrx.start,stop,+.txt).\nFor example: rm sample.mother.chrY,*.txt',1)
 	
 	
 # DONE LIKELIHOOD COMPUTATIONS
@@ -4782,7 +5935,7 @@ if not len(singlesampleid): # use these as the post combos
 	# ----------------------------------
 	
 	if len(postcombos) and not KEEPALIVE:
-		sys.exit('glimmrHet.py: Finished scheduling posterior probability jobs. When completed, use --post flag to compute posterior probabilities.')
+		sys.exit('glimmrHet.py: Finished scheduling posterior probability jobs.')
 	elif len(singlesampleid) > 3: 
 		sys.exit('Specify only 3 channels using --ids or --sampleids flag to compute posterior probs.')
 
@@ -4815,7 +5968,7 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 		motherfiles[sampleID] = motherfile
 	
 	# modeltype selection
-	mdec = {1:'inp,nuc', 2:'nuc,ptm', 3:'inp,ptm', 4:'inp,nuc,ptm', 6:'atac,atacinp'}
+	mdec = {1:'inp,nuc', 2:'nuc,ptm', 3:'inp,ptm', 4:'inp,nuc,ptm', 6:'atac,atacinp', 7:'dnase,dnaseinp'}
 	modeltype = 0
 	
 	if nchannels == 2 and 'inp' in A2S and A2S['inp'] in SID and 'nuc' in A2S and A2S['nuc'] in SID: modeltype = 1
@@ -4824,6 +5977,7 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 	elif nchannels == 3: modeltype = 4
 	
 	elif nchannels == 2 and 'atac' in A2S and A2S['atac'] in SID and 'atacinp' in A2S and A2S['atacinp'] in SID: modeltype = 6
+	elif nchannels == 2 and 'dnase' in A2S and A2S['dnase'] in SID and 'dnaseinp' in A2S and A2S['dnaseinp'] in SID: modeltype = 7
 	elif nchannels == 1 and 'atac' in alias2sample and alias2sample['atac'] in sampleIDs:
 		modeltype = 6
 		nchannels = 2
@@ -4840,11 +5994,28 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 		Pr[inpsample] = 1-Pr[nucsample]
 		sample2alias[inpsample] = 'atacinp'
 		alias2sample['atacinp'] = inpsample
+	elif nchannels == 1 and 'dnase' in alias2sample and alias2sample['dnase'] in sampleIDs:
+		modeltype = 7
+		nchannels = 2
+		inpsample = alias2sample['dnase']+'.shuffle'
+		sampleIDs += [inpsample]
+		motherfile = theptmdir+inpsample+'.mother'
+		if boundsfile: motherfile += boundslabel+'.txt'
+		else: motherfile += '.txt'
+		motherfiles[inpsample] = motherfile
+		
+		sampleReadLengths[inpsample] = sampleReadLengths[nucsample]
+		fragDiameter4Sample[inpsample] = fragDiameter4Sample[nucsample]
+		
+		Pr[inpsample] = 1-Pr[nucsample]
+		sample2alias[inpsample] = 'dnaseinp'
+		alias2sample['dnaseinp'] = inpsample
 		
 	
 	# shorthand
 	SID = sampleIDs
 	S2A = sample2alias
+	
 	A2S = alias2sample
 	
 	if modeltype == 0: 
@@ -4879,7 +6050,9 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 		if not os.access(motherfiles[s], os.F_OK):
 			HAVEALLLIKS = False
 			if modeltype == 6:
-				sys.stderr.write('  - WARNING: Cannot access shuffle likelihood file for ATAC-seq sample: %s.\n    Use glimmrShuffleLikelihood.py to generate it.\n'%(motherfiles[s])); sys.stderr.flush()
+				sys.stderr.write('  - WARNING: Cannot access shuffled likelihood file for ATAC-seq sample: %s.\n    Use glimmrShuffleLikelihood.py to generate it.\n'%(motherfiles[s])); sys.stderr.flush()
+			elif modeltype == 7:
+				sys.stderr.write('  - WARNING: Cannot access shuffled likelihood file for DNase-seq sample: %s.\n    Use glimmrShuffleLikelihood.py to generate it.\n'%(motherfiles[s])); sys.stderr.flush()
 			else:
 				sys.stderr.write('  - WARNING: Cannot access likelihood file %s\n'%(motherfiles[s])); sys.stderr.flush()
 			
@@ -4912,7 +6085,7 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 		
 		pipeit('- Reference genome: %s N=%s loci, M=%s chromosomes'%(bfaref,flg,len(GR)),1,outlogfh)
 		
-	# just need the reference for chromosome lengths
+	# get chromosome lengths
 	chromlengths = dict( map(lambda k: (k, len(GR[k]['seq'])), GR) )
 	
 	# Set up genotyping bounds
@@ -5173,10 +6346,11 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 	else: print >> sys.stderr, 'Warning: could not access file: %s'%(crdfile)
 	
 	# link atac shuffle
-	if 'atac' in totalReads and 'atacinp' not in totalReads: totalReads['atacinp'] = totalReads['atac']
-	if 'atac' in ssubtmp and 'atacinp' not in ssubtmp: ssubtmp['atacinp'] = ssubtmp['atac']
-	if 'atac' in betTotalReads: betTotalReads['atacinp'] = betTotalReads['atac']
-	
+	for key in ['atac','dnase']:
+		if key in totalReads and '%sinp'%(key) not in totalReads: totalReads['%sinp'%(key)] = totalReads[key]
+		if key in ssubtmp and '%sinp'%(key) not in ssubtmp: ssubtmp['%sinp'%(key)] = ssubtmp[key]
+		if key in betTotalReads: betTotalReads['%sinp'%(key)] = betTotalReads[key]
+
 	pipeit('- Subsample rate: %s'%(ssubtmp),1)
 	pipeit('- Subsample rate: %s'%(ssubtmp),1,outlogfh)
 	
@@ -5251,6 +6425,13 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 			Pgbias = {'atacinp':pri/(pri+prn), 'atac':prn/(pri+prn)}
 		else:
 			Pgbias = {'atacinp':1/2., 'atac':1/2.}
+	elif modeltype == 7:
+		if ttr > 0:
+			pri = ttr/GTReads['dnaseinp']
+			prn = ttr/GTReads['dnase']
+			Pgbias = {'dnaseinp':pri/(pri+prn), 'dnase':prn/(pri+prn)}
+		else:
+			Pgbias = {'dnaseinp':1/2., 'dnase':1/2.}
 	
 	# Scale the global within-sample read bias correction with between-sample correction
 	# ==================================================================================
@@ -5260,8 +6441,8 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 	
 	pipeit('- Global coverage correction',1)
 	pipeit('- Global coverage correction',1,outlogfh)
-	pipeit('  Within-sample weights:  %s'%(' '.join(['%s=%.3f'%(x,y) for x,y in Pgbias.items()])), 1)
-	pipeit('  Within-sample weights:  %s'%(' '.join(['%s=%.3f'%(x,y) for x,y in Pgbias.items()])), 1,outlogfh)
+	pipeit('  Within-sample coverage weights:  %s'%(' '.join(['%s=%.3f'%(x,y) for x,y in Pgbias.items()])), 1)
+	pipeit('  Within-sample coverage weights:  %s'%(' '.join(['%s=%.3f'%(x,y) for x,y in Pgbias.items()])), 1,outlogfh)
 	
 	# Compute global between-sample coverage weights
 	# ==============================================
@@ -5354,27 +6535,33 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 					# print 'local bias     : inp: %.3f, nuc: %.3f'%(totalReads['inp'][chrom], totalReads['nuc'][chrom])
 					pipeit('- %s cov. bias: inp: %.3f, nuc: %.3f'%(chrom, Pbias['inp'], Pbias['nuc']),1)
 					pipeit('- %s cov. bias: inp: %.3f, nuc: %.3f'%(chrom, Pbias['inp'], Pbias['nuc']),1,outlogfh)
+					
 				elif modeltype == 2:
 					prn = ttr/totalReads['nuc'][chrom]; prp = ttr/totalReads['ptm'][chrom]
 					Pbias = {'nuc':prn/(prn+prp), 'ptm':prp/(prn+prp)}
 					Pbias = {'nuc':Pbias['nuc']+Pgbias['nuc'], 'ptm':Pbias['ptm']+Pgbias['ptm']}
 					Pt = float(sum(Pbias.values()))
 					Pbias = {'nuc':Pbias['nuc']/Pt, 'ptm':Pbias['ptm']/Pt}
-					print '- %s cov. bias: nuc: %.3f, ptm: %.3f'%(chrom, Pbias['nuc'], Pbias['ptm'])
+					pipeit('- %s cov. bias: nuc: %.3f, ptm: %.3f'%(chrom, Pbias['nuc'], Pbias['ptm']),1)
+					pipeit('- %s cov. bias: nuc: %.3f, ptm: %.3f'%(chrom, Pbias['nuc'], Pbias['ptm']),1,outlogfh)
+					
 				elif modeltype == 3:
 					pri = ttr/totalReads['inp'][chrom]; prp = ttr/totalReads['ptm'][chrom]
 					Pbias = {'inp':pri/(pri+prp), 'ptm':prp/(pri+prp)}
 					Pbias = {'inp':Pbias['inp']+Pgbias['inp'], 'ptm':Pbias['ptm']+Pgbias['ptm']}
 					Pt = float(sum(Pbias.values()))
 					Pbias = {'inp':Pbias['inp']/Pt, 'ptm':Pbias['ptm']/Pt}
-					print '- %s cov. bias: inp: %.3f, ptm: %.3f'%(chrom, Pbias['inp'], Pbias['ptm'])
+					pipeit('- %s cov. bias: inp: %.3f, ptm: %.3f'%(chrom, Pbias['inp'], Pbias['ptm']),1)
+					pipeit('- %s cov. bias: inp: %.3f, ptm: %.3f'%(chrom, Pbias['inp'], Pbias['ptm']),1,outlogfh)
+					
 				elif modeltype == 4:
 					pri = ttr/totalReads['inp'][chrom]; prn = ttr/totalReads['nuc'][chrom]; prp = ttr/totalReads['ptm'][chrom]
 					Pbias = {'inp':pri/(pri+prn+prp), 'nuc':prn/(pri+prn+prp), 'ptm':prp/(pri+prn+prp)}
 					Pbias = {'inp':Pbias['inp']+Pgbias['inp'], 'nuc':Pbias['nuc']+Pgbias['nuc'], 'ptm':Pbias['ptm']+Pgbias['ptm']}
 					Pt = float(sum(Pbias.values()))
 					Pbias = {'inp':Pbias['inp']/Pt, 'nuc':Pbias['nuc']/Pt, 'ptm':Pbias['ptm']/Pt}
-					print '- %s cov. bias: inp: %.3f, nuc: %.3f, ptm: %.3f'%(chrom, Pbias['inp'], Pbias['nuc'], Pbias['ptm'])
+					pipeit('- %s cov. bias: inp: %.3f, nuc: %.3f, ptm: %.3f'%(chrom, Pbias['inp'], Pbias['nuc'], Pbias['ptm']),1)
+					pipeit('- %s cov. bias: inp: %.3f, nuc: %.3f, ptm: %.3f'%(chrom, Pbias['inp'], Pbias['nuc'], Pbias['ptm']),1,outlogfh)
 			
 				elif modeltype == 5:
 					# only 1 sample so no correction is needed
@@ -5385,6 +6572,8 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 					Pt = float(sum(Pbias.values()))
 					Pbias = {'atac':Pbias['atac']/Pt}
 					pipeit('- %s cov. bias: atac: %.3f'%(chrom, Pbias['atac']),1)
+					pipeit('- %s cov. bias: atac: %.3f'%(chrom, Pbias['atac']),1,outlogfh)
+				
 				elif modeltype == 6:
 					pri = ttr/totalReads['atacinp'][chrom]; prn = ttr/totalReads['atac'][chrom]
 					Pbias = {'atacinp':pri/(pri+prn), 'atac':prn/(pri+prn)}
@@ -5395,9 +6584,22 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 					Pbias = {'atacinp':Pbias['atacinp']/Pt, 'atac':Pbias['atac']/Pt}
 					# print 'global bias    : inp: %.3f, nuc: %.3f'%(Pgbias['inp'], Pgbias['nuc'])
 					# print 'local bias     : inp: %.3f, nuc: %.3f'%(totalReads['inp'][chrom], totalReads['nuc'][chrom])
-					pipeit('- %s cov. bias: atacinp: %.3f, nuc: %.3f'%(chrom, Pbias['atacinp'], Pbias['atac']),1)
-					pipeit('- %s cov. bias: atac: %.3f, nuc: %.3f'%(chrom, Pbias['atacinp'], Pbias['atac']),1,outlogfh)
-				
+					pipeit('- %s cov. bias: atacinp: %.3f, atac: %.3f'%(chrom, Pbias['atacinp'], Pbias['atac']),1)
+					pipeit('- %s cov. bias: atacinp: %.3f, atac: %.3f'%(chrom, Pbias['atacinp'], Pbias['atac']),1,outlogfh)
+
+				elif modeltype == 7:
+					pri = ttr/totalReads['dnaseinp'][chrom]; prn = ttr/totalReads['dnase'][chrom]
+					Pbias = {'dnaseinp':pri/(pri+prn), 'dnase':prn/(pri+prn)}
+					# Combine this scaffold-bias with global-bias probability
+					Pbias = {'dnaseinp':(Pbias['dnaseinp']+Pgbias['dnaseinp']), 'dnase':(Pbias['dnase']+Pgbias['dnase'])}
+					# Rescale to probability
+					Pt = float(sum(Pbias.values()))
+					Pbias = {'dnaseinp':Pbias['dnaseinp']/Pt, 'dnase':Pbias['dnase']/Pt}
+					# print 'global bias    : inp: %.3f, nuc: %.3f'%(Pgbias['inp'], Pgbias['nuc'])
+					# print 'local bias     : inp: %.3f, nuc: %.3f'%(totalReads['inp'][chrom], totalReads['nuc'][chrom])
+					pipeit('- %s cov. bias: dnaseinp: %.3f, nuc: %.3f'%(chrom, Pbias['dnaseinp'], Pbias['dnase']),1)
+					pipeit('- %s cov. bias: dnaseinp: %.3f, nuc: %.3f'%(chrom, Pbias['dnaseinp'], Pbias['dnase']),1,outlogfh)
+					
 			except KeyError: 
 				print >> sys.stderr, 'Warning: could not locate coverage information for %s from chromosome %s. Check file: %s. Defaulting to no bias.'%(sampleID, chrom, crdfile)
 				Pbias = Pgbias
@@ -5416,6 +6618,15 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 			elif nchannels == 2 and 'atac' in A2S and 'atacinp' in A2S and A2S['atacinp'] in SID and A2S['atac'] in SID:
 				Pbias = {'atacinp':Pgbias['atacinp'], 'atac':Pgbias['atac']}
 				print '- %s default cov. bias: atacinp: %.3f, atac: %.3f'%(chrom, Pbias['atacinp'], Pbias['atac'])
+			
+			# DNase
+			elif nchannels == 1 and 'dnase' in A2S and A2S['dnase'] in SID:
+				Pbias = {'dnase':Pgbias['dnase']}
+				print '- %s default cov. bias: dnase: %.3f'%(chrom, Pbias['dnase'])
+			elif nchannels == 2 and 'dnase' in A2S and 'dnaseinp' in A2S and A2S['dnaseinp'] in SID and A2S['dnase'] in SID:
+				Pbias = {'dnaseinp':Pgbias['dnaseinp'], 'dnase':Pgbias['dnase']}
+				print '- %s default cov. bias: dnaseinp: %.3f, dnase: %.3f'%(chrom, Pbias['dnaseinp'], Pbias['dnase'])
+			
 			# ChIP
 			elif nchannels == 2 and 'inp' in A2S and 'nuc' in A2S and A2S['inp'] in SID and A2S['nuc'] in SID:
 				Pbias = {'inp':Pgbias['inp'], 'nuc':Pgbias['nuc']}
@@ -5720,7 +6931,7 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 				# take a real file and scramble the chrom/pos locations for atac control?
 				sys.exit("modeltype 5 not implemented")
 				
-			elif modeltype == 6: # atac vs atainp
+			elif modeltype == 6: # atac vs atacinp
 				# given state is x, what is prob of x emitting data from condition y
 				dn = depth[A2S['atac']]; di = depth[A2S['atacinp']]
 				# we normalized the likelihoods, so now we need to normalize the coverage itself
@@ -5729,6 +6940,18 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 				
 				transLik = {'atacinp': (lik[nucidx]*(1./dn)+lPerr)*dn,
 				            'atac': (lik[inpidx]*(1./di)+lPerr)*di}
+				# unified likelihood values given each model condition
+				lik = map(lambda ci: lik[ci] + transLik[S2A[SID[ci]]], rlc)
+
+			elif modeltype == 7: # dnase vs dnaseinp
+				# given state is x, what is prob of x emitting data from condition y
+				dn = depth[A2S['dnase']]; di = depth[A2S['dnaseinp']]
+				# we normalized the likelihoods, so now we need to normalize the coverage itself
+				di = Kcov[inpidx]*di
+				dn = Kcov[nucidx]*dn
+				
+				transLik = {'dnaseinp': (lik[nucidx]*(1./dn)+lPerr)*dn,
+				            'dnase': (lik[inpidx]*(1./di)+lPerr)*di}
 				# unified likelihood values given each model condition
 				lik = map(lambda ci: lik[ci] + transLik[S2A[SID[ci]]], rlc)
 				
@@ -5908,7 +7131,7 @@ if not os.access(postfile, os.F_OK) or REDOPEAKCALLING:
 					rat2 = roundna(3)(divna( divna(depth[ptmsample],ud[ptmidx]), divna(depth[inpsample],ud[inpidx])))
 				
 				# ATAC-seq models
-				elif modeltype == 6:
+				elif modeltype == 6 or modeltype == 7:
 					rat1 = 1
 					rat2 = roundna(3)(divna(  divna(depth[nucsample],ud[nucidx]), divna(depth[inpsample],ud[inpidx])))
 				

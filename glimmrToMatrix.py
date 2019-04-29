@@ -24,6 +24,7 @@ version = """\nglimmrToMatrix.py, version %s
 indirfile = ''
 reffile = ''
 reflengths = ''
+INVERT = False
 value = 'Q'
 outfile = None
 
@@ -47,6 +48,7 @@ while ai < len(args):
 	elif arg == 'o' or arg == 'outfile': outfile = val
 	elif arg == 'ref' or arg == 'r': reffile = val
 	elif arg == 'lengths': reflengths = val
+	elif arg == 'invert': INVERT = True; ai-=1
 	elif arg == 'value': value = val
 	else:
 		help += "=> The specified argument \""+arg+"\" does not parse."
@@ -66,7 +68,8 @@ if reffile:
 	for k in G.keys(): scafLengths[k] = len(G[k]['seq'])
 	sys.stderr.write('n=%s scaffolds\n'%(len(G.keys()))); sys.stderr.flush()
 elif reflengths:
-	scafLengths = dict(map(lambda x: (x[1],int(x[0])), readTable(reflengths,header=0,rownames=0)[0]))
+	scafLengths = dict(map(lambda x: (x[0],int(x[1])), readTable(reflengths,header=0,rownames=0)[0]))
+	if INVERT: scafLengths = dict(map(lambda x: (x[1],int(x[0])), readTable(reflengths,header=0,rownames=0)[0]))
 	sys.stderr.write('n=%s scaffolds\n'%(len(scafLengths.keys()))); sys.stderr.flush()
 
 allscaffolds = {}

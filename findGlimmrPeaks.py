@@ -2,6 +2,7 @@
 
 import re, sys, os, stat, math, glob, random
 from glimmrAccessories import *
+import plot
 
 version = """\nfindGlimmrPeaks.py, version %s
  
@@ -20,59 +21,15 @@ version = """\nfindGlimmrPeaks.py, version %s
 
 """%s"""%(version)
 
-PLOTINCLUDE = False
-# import plot
+#! /usr/bin/env python
+
+"""Identify significant regions of binding using glimmr.py posterior files."""
 
 # Important note: this only works up to a certain stringency Q ~ 200, beyond which anything will be considered significant
 
-
 # LOCAL METHODS
 # ------------------------------------------------------------------
-def buildRegions2(X,Y, cutoff, gap=0, minlength=None, maxlength=None):
-	peaks = zip(X,Y)
-	nallpeaks = len(peaks)
-	peaks = filter(lambda x: x[1]>=cutoff, peaks) # count peaks above some threshold
-	npeaks = len(peaks)
-	
-	# cluster segments
-	clusters = []
-	i = 0
-	curr = []
-	
-	# SAW_THE_VOID = False
-	# INSIDE_PEAK2 = False
-	
-	while i < len(peaks):
-		# if len(curr): 
-		# 	if abs(peaks[i][0] - curr[-1]) <= 10: SAW_THE_VOID = False
-		# 	else: SAW_THE_VOID = True
-		# else: SAW_THE_VOID = False
-		
-		# if len(curr) and SAW_THE_VOID:
-			# if abs(peaks[i][0] - curr[-1]) <= 10: INSIDE_PEAK2 = True
-			# else: INSIDE_PEAK2 = False
-			
-		
-		# print 'i', i, 'lasti', lasti
-		if len(curr) and abs(peaks[i][0] - curr[-1]) > gap or (SAW_THE_VOID and INSIDE_PEAK2):
-			# print 'Completed cluster', len(curr)
-			clusters += [[curr[0], curr[-1]]]
-			# print 'DONE CLUSTER', i, lasti, curr[-1]
-			curr = []
-			# SAW_THE_VOID = False
-		else: 
-			curr += [peaks[i][0]]
-			# SAW_THE_VOID = False
-		i += 1
-	
-	if minlength: clusters = filter(lambda x: abs(x[0]-x[1])+1 >= minlength, clusters)
-	if maxlength: clusters = filter(lambda x: abs(x[0]-x[1])+1 < maxlength, clusters)
-	
-	return {'nallpeaks':nallpeaks, 'npeaks':npeaks, 'nclusters':len(clusters), 'clusters':clusters}
-
-
-
-def buildRegions(X, fragmentLength, cutoff=None, direction=lambda x,y: x >= y, gap=0, minlength=None, maxlength=None, loffset=0, hoffset=0, scaffoldlength=100e9):
+def buildRegions(X, Qthresh, fragmentLength, cutoff=None, direction=lambda x,y: x >= y, gap=0, minlength=None, maxlength=None, loffset=0, hoffset=0, scaffoldlength=100e9):
 	nallpeaks = len(X)
 	
 	# matrix method
@@ -83,14 +40,15 @@ def buildRegions(X, fragmentLength, cutoff=None, direction=lambda x,y: x >= y, g
 	# adaptive threshold
 	# X = [pos,Q,cutoff,Q]
 	# X[1] is current score, X[2] is cutoff for this position
-	peaks = filter(lambda x: direction(x[1],x[2]), X) # count peaks at or above some threshold
+	
+	peaks = filter(lambda x: direction(x[1],Qthresh), X) # count peaks at or above some threshold
 	npeaks = len(peaks)
 	
 	# Q score dictionary
-	Qdct = dict(map(lambda x: (x[0],x[3]), peaks))
+	Qdct = dict(peaks)
 	
 	# filter P scores for profile
-	peaks = map(lambda x: (x[0],x[1]), peaks)
+	# peaks = map(lambda x: (x[0],x[1]), peaks)
 	
 	# print 'before/after', len(X), len(peaks)
 	clusters = []
@@ -183,38 +141,13 @@ def buildRegions(X, fragmentLength, cutoff=None, direction=lambda x,y: x >= y, g
 		cut = percentile(profile, .9) # this is the upper 90% cutoff
 		profile = filter(lambda x: x[1]>=cut, zip(xrange(clo,chi),profile))
 		# profile now contains only positions and scores above cutoff
-		# print 'post filter', len(profile), profile[:10]
-		# profile = zip(xrange(clo,chi),profile)
 		if len(profile): 
 			posx, profile = unzip(profile)
-			
 			# 2 alternatives
 			# -------------------------------
 			# take the center of this upper 90%
 			idx = int( round((posx[-1] - posx[0])/2.) )
-		
-			# find the first position with greatest score
-			# idx = int(round(ut.argmax(profile)))
-			# -------------------------------
-		
-		
-			# rprofile = [profile[len(profile)-i-1] for i in range(len(profile))]
-			# idx2 = int(round((ut.argmax(profile) + ut.argmax(rprofile))/2.))
-		
-			# average of the mode and median
-			# midx = (posx[1]-posx[0])/2.
-			# idx = int(round((.6*idx + .3*midx + .1*idx2)))
-		
-			# custom = 'set arrow nohead from %s,0 to %s,1 lt 1'%(idx,idx)
-			# custom += '; set arrow nohead from %s,0 to %s,1 lt 2'%(idx2,idx2)
-			# plot.scatter(zip(range(len(profile)), profile), style='linespoints', custom=custom)
-		
 			center = posx[0]+idx
-			# center = (posx[0] + idx+1 + int(regionlength/2.)) - (posx[0] + idx - int(regionlength/2.))
-		
-			# cl2 += [[posx[0] + idx - int(regionlength/2.), posx[0] + idx+1 + int(regionlength/2.), posx[0]+idx]]
-			# cl2 += [[posx[0] + idx - int(regionlength/2.), posx[0] + idx+1 + int(regionlength/2.), posx[0]+idx]]
-		
 			cl2 += [[clo,chi,center,score]]
 		
 	clusters = cl2
@@ -257,7 +190,7 @@ diameter = 50 # window size for smoothing
 Qthresh = 20.0 # minimum model confidence to begin peak call
 dirstr = '';#'greater'
 CUTDIRECTION = None; lambda x,y: x >= y
-
+DIFFERENTIALPEAKS = False # also look for peaks with negative signal
 # regionlength = 147
 
 # values based on bioanalyzer results
@@ -307,10 +240,7 @@ CLEARFILES = 0
 
 # CLI ARGS
 # -------------------------------------------------------------------
-help = """\nHELP for findGlimmrPeaks.py
-
-Identify significant regions of binding using glimmr.py posterior files.
-"""
+help = '\nHELP for PROGRAM_NAME.PY\n'
 nhelps = 0; helplimit = 0
 args = sys.argv[:]
 argstr = ''.join(args)
@@ -338,6 +268,7 @@ while ai < len(args):
 	elif re.match('^readlength$|^readlen$', arg): loffset = int(val)
 	elif re.match('^maxgap$|^gap$', arg): MAXGAP = int(val)
 	elif arg == 'logscore': cfunc = logscore; ai-=1
+	elif arg == 'differential': DIFFERENTIALPEAKS = True; ai-=1
 	elif re.match('verbose|^v$', arg): VERBOSE = True; ai -=1
 	elif arg == 'spatialplot': SPATIALPROFILE = True; ai-=1
 	elif arg == 'plotdist': PLOTDISTANCEONLY = val
@@ -399,11 +330,9 @@ if PLOTDISTANCEONLY and SUPERMETA:
 			metaLS += LS
 			
 		fo = sizedir+'supermeta peak size distribution freq.pdf'
+		plot.hist(metasizes, bins=[100,125,150,175,200,225,250,275,300], file=fo, custom='set size ratio 1; set yrange [0:*]', xlabel='Peak size (nt)', ylabel='Frequency', yfreq=1)
 		
-		if PLOTINCLUDE:
-			plot.hist(metasizes, bins=[100,125,150,175,200,225,250,275,300], file=fo, custom='set size ratio 1; set yrange [0:*]', xlabel='Peak size (nt)', ylabel='Frequency', yfreq=1)
-			
-			plot.scatter(metaLS, xlabel='ROI length (nt)', ylabel='ROI score', file=sizedir+'supermeta_score_vs_size.pdf', logscale='x', custom='set grid; set xrange [%s:*]'%(MINLENGTH))
+		plot.scatter(metaLS, xlabel='ROI length (nt)', ylabel='ROI score', file=sizedir+'supermeta_score_vs_size.pdf', logscale='x', custom='set grid; set xrange [%s:*]'%(MINLENGTH))
 		
 	except IOError: sys.exit('Cannot access bedfile %s'%(bedfile))
 	
@@ -412,68 +341,61 @@ if PLOTDISTANCEONLY and SUPERMETA:
 
 
 if PLOTDISTANCEONLY:
-	print 'PLOT DISTANCE ONLY'
+	print 'PLOT DISTANCE ONLY', PLOTDISTANCEONLY
 	
-	# dirfiles = [PLOTDISTANCEONLY]
-	# if not os.access(PLOTDISTANCEONLY, os.F_OK):
-	# 	dirfiles = glob.glob(PLOTDISTANCEONLY)
-	#
-	#
 	if isdir(PLOTDISTANCEONLY) or os.access(PLOTDISTANCEONLY,os.F_OK):
 		dirfiles = getFiles(PLOTDISTANCEONLY)
 	else:
 		dirfiles = glob.glob(PLOTDISTANCEONLY)
 	
+	if not len(dirfiles): dirfiles = [PLOTDISTANCEONLY]
 	
 	print 'recovered', dirfiles
-	try:
-		labels = []
-		metasizes = []
-		metaLS = []
-		for f in dirfiles:
-			# lab = f.split('/')[-1].split('.')[0]
-			lab = getLabel(f)
-			
-			dirstr = None
-			if 'greater' in f:
-				lab += '.greater'
-				dirstr = 'greater.'
-			elif 'lesser' in f:
-				lab += '.lesser'
-				dirstr = 'lesser.'
-			
-			print '- Lab', lab
-			labels += [lab]
-			
-			tab,r,c = readTable(f)
-			sizes = map(lambda x: abs(int(x[0])-int(x[1])), tab)
-			# if not len(sizes): metasizes += [[0]]
-			metasizes += [sizes]
-			
-			hist = histogram(sizes, bins=bins)
-			hist += [('Total', len(sizes))]
-			printTable(hist, file=sizedir+'%s peak size distribution Q%s.%stxt'%(name,Qthresh,dirstr))
-			
-			
-			# also make a scatterplot of score vs length
-			LS = map(lambda x: (abs(int(x[0])-int(x[1])), cfunc(x[3])), tab)
-			metaLS += [LS]
-			if PLOTINCLUDE:
-				plot.scatter(LS, xlabel='ROI length (nt)', ylabel='ROI score', file=sizedir+'%s_size_vs_score.%spdf'%(name,dirstr), logscale='x', custom='set grid; set xrange [%s:*]'%(MINLENGTH))
-			
-		labels = map(lambda x: x.replace('_', '-'), labels)
+	labels = []
+	metasizes = []
+	metaLS = []
+
+	for f in dirfiles:
+		# lab = f.split('/')[-1].split('.')[0]
+		lab = getLabel(f)
 		
-		if PLOTINCLUDE:
-			fo = sizedir+'%s peak size distribution freq Q%s.pdf'%(name, Qthresh)
-			plot.hist(metasizes, bins=[50,75,100,125,150,175,200,225,250,275,300,350,400,450,500,1000,2000,5000,10000], file=fo, custom='set size ratio .2; set yrange [0:.4]', xlabel='Peak size (nt)', ylabel='Frequency', yfreq=1, legends=labels, style='histogram')
-			
-			plot.scatter(metaLS, xlabel='ROI length (nt)', ylabel='ROI relative score difference', file=sizedir+'meta_%s_size_vs_score.pdf'%(name), logscale='x', custom='set grid; set xrange [%s:*]; set key top'%(MINLENGTH), legends=labels)
+		dirstr = None
+		if 'greater' in f:
+			lab += '.greater'
+			dirstr = 'greater.'
+		elif 'lesser' in f:
+			lab += '.lesser'
+			dirstr = 'lesser.'
 		
-		# count not frequency
-		# plot.hist(sizes, bins=[0,5,10,25,50,75,100,125,150,175,200,225,250,275,300,350,400,450,500,1000,2000,5000,10000], file=sizedir+'%s peak size distribution Q%s.pdf'%(name, Qthresh), custom='set size ratio .3; set yrange [0:*]', xlabel='Peak size (nt)', ylabel='Count', yfreq=0)#'; set yrange [0:%s]'%(rnge+.05*rnge))
+		print '- Lab', lab
+		labels += [lab]
+		
+		tab,r,c = readTable(f)
+		sizes = map(lambda x: abs(int(x[0])-int(x[1])), tab)
+		# if not len(sizes): metasizes += [[0]]
+		metasizes += [sizes]
+		
+		hist = histogram(sizes, bins=bins)
+		hist += [('Total', len(sizes))]
+		printTable(hist, file=sizedir+'%s peak size distribution Q%s.%stxt'%(name,Qthresh,dirstr))
+		
+		
+		# also make a scatterplot of score vs length
+		LS = map(lambda x: (abs(int(x[0])-int(x[1])), cfunc(x[3])), tab)
+		metaLS += [LS]
+		plot.scatter(LS, xlabel='ROI length (nt)', ylabel='ROI score', file=sizedir+'%s_size_vs_score.%spdf'%(name,dirstr), logscale='x', custom='set grid; set xrange [%s:*]'%(MINLENGTH))
+		
+	labels = map(lambda x: x.replace('_', '-'), labels)
 	
+	ratty = 0.2
+	if name == 'ALL': ratty = 0.5
+	fo = sizedir+'%s peak size distribution freq Q%s.pdf'%(name, Qthresh)
+	plot.hist(metasizes, bins=[50,75,100,125,150,175,200,225,250,275,300,350,400,450,500,1000,2000,5000,10000], file=fo, custom='set size ratio %s; set yrange [0:.4]'%(ratty), xlabel='Peak size (nt)', ylabel='Frequency', yfreq=1, legends=labels, style='histogram')
 	
-	except IOError: sys.exit('Cannot access bedfile %s'%(bedfile))
+	plot.scatter(metaLS, xlabel='ROI length (nt)', ylabel='ROI relative score difference', file=sizedir+'meta_%s_size_vs_score.pdf'%(name), logscale='x', custom='set grid; set xrange [%s:*]; set key top'%(MINLENGTH), legends=labels)
+	
+	# count not frequency
+	# plot.hist(sizes, bins=[0,5,10,25,50,75,100,125,150,175,200,225,250,275,300,350,400,450,500,1000,2000,5000,10000], file=sizedir+'%s peak size distribution Q%s.pdf'%(name, Qthresh), custom='set size ratio .3; set yrange [0:*]', xlabel='Peak size (nt)', ylabel='Count', yfreq=0)#'; set yrange [0:%s]'%(rnge+.05*rnge))
 	
 	# plot.hist(sizes, bins=[0,5,10,25,50,75,100,125,150,175,200,225,250,275,300,350,400,450,500,1000,2000,5000,10000], file=sizedir+'%s peak size distribution Q%s.pdf'%(name, Qthresh), custom='set size ratio .3', xlabel='Peak size (nt)', ylabel='Count')#'; set yrange [0:%s]'%(rnge+.05*rnge))
 	
@@ -482,7 +404,9 @@ if PLOTDISTANCEONLY:
 
 
 if method == 'glimmr':
-	Pthresh = 1-(10**(-float(Qthresh)/10.))
+	Q2P = lambda x: 1.-10**((-2**(x)-1)/10.)
+	Pthresh = Q2P(Qthresh)
+	# Pthresh = 1-(10**(-float(Qthresh)/10.))
 	print 'Name', name, 'Q/thresh', Qthresh, Qthresh
 
 # ---------------------------------------
@@ -492,7 +416,7 @@ nucprofile = {}
 ptmprofile = {}
 if SPATIALPROFILE:
 	print 'Loading reference genome'
-	G = readFasta(reffile)
+	G = sd.readFasta(reffile)
 	if chrom:
 		for k in G.keys():
 			if k != chrom: del G[k]
@@ -631,7 +555,7 @@ if method == 'glimmr':
 elif method == 'matrix':
 	# Load data from matrix file
 	# this should be done by chromosome to save memory
-	print '\n [[Matrix]] Loading input data...', indirfile
+	print '\n [[Matrix]] Processing file', indirfile
 	currScaf = None; scafcount = 1
 	clusters = {} # temporary storage for bound regions
 	
@@ -643,8 +567,8 @@ elif method == 'matrix':
 		
 		# just add info to current scaffold until we reach the next scaffold
 		row = line[:-1].split('\t')
-		
 		chrom = row.pop(0)
+		print >> sys.stderr, 'chrom=%s'%(chrom)
 		pos = xrange(len(row))
 		Q = map(floatna,row)
 		# cut = [Qthresh for x in pos]
@@ -658,31 +582,34 @@ elif method == 'matrix':
 		
 		scafcount += 1
 		# now we find peaks for this scaffold
-		if VERBOSE: print '- lines=%s | %s (%s) | filtering (Q>%s)'%(nkeep, currScaf, scafcount,Qthresh),
+		if VERBOSE: print >> sys.stderr, '- lines=%s | %s (%s) | filtering (Q>%s)'%(nkeep, currScaf, scafcount,Qthresh),
 		# print '- Finding multi-locus bound regions...'
-		resP = buildRegions(zip(pos,Q,[Qthresh for x in pos],Q), fragmentlength, direction=lambda x,y: x >= y, gap=MAXGAP, minlength=MINLENGTH, maxlength=MAXLENGTH, loffset=loffset, hoffset=hoffset, scaffoldlength=len(pos))
-		resN = buildRegions(zip(pos,Q,[-Qthresh for x in pos],Q), fragmentlength, direction=lambda x,y: x < y, gap=MAXGAP, minlength=MINLENGTH, maxlength=MAXLENGTH, loffset=loffset, hoffset=hoffset, scaffoldlength=len(pos))
-		
-		# merge positive and negative
-		tPeaks = resP['npeaks']+resN['npeaks']
-		taPeaks = resP['nallpeaks']+resN['nallpeaks']
-		tClusters = resP['nclusters']+resN['nclusters']
+		# don't need negative peaks unless calling differential	
+		resP = buildRegions(zip(pos,Q), Qthresh, fragmentlength, direction=lambda x,y: x >= y, gap=MAXGAP, minlength=MINLENGTH, maxlength=MAXLENGTH, loffset=loffset, hoffset=hoffset, scaffoldlength=len(pos))
+		tPeaks = resP['npeaks']
+		taPeaks = resP['nallpeaks']
+		tClusters = resP['nclusters']
+		theclusters = [(resP['clusters'],'+')]
+
+		if DIFFERENTIALPEAKS:
+			resN = buildRegions(zip(pos,Q), -Qthresh, fragmentlength, direction=lambda x,y: x < y, gap=MAXGAP, minlength=MINLENGTH, maxlength=MAXLENGTH, loffset=loffset, hoffset=hoffset, scaffoldlength=len(pos))	
+			# merge positive and negative
+			tPeaks = resP['npeaks']+resN['npeaks']
+			taPeaks = resP['nallpeaks']+resN['nallpeaks']
+			tClusters = resP['nclusters']+resN['nclusters']
+			theclusters = [(resP['clusters'],'+'), (resN['clusters'],'-')]
+
 		if VERBOSE: print '=> %s/%s => %s peaks'%(tPeaks,taPeaks,tClusters)
 		
 		nlocikeep += tPeaks
 		if tClusters > 0: nscaffolds += 1
 		
 		# process each peak
-		for p,strand in [(resP['clusters'],'+'), (resN['clusters'],'-')]:
+		for p,strand in theclusters:
 			for x in p:
 				#                                     start, stop, center, Q-score
 				print >> pf, '\t'.join(map(str,[chrom, x[0], x[1], x[2], round(x[3],3), strand]))
-				npeaks += 1
-		
-		# construct spatial probability profile
-		# if SPATIALPROFILE and issig == 'nuc': nucprofile[chrom][pos] = (pos,P)
-		# elif SPATIALPROFILE and issig == 'ptm': ptmprofile[chrom][pos] = (pos,P)
-	
+				npeaks += 1	
 	fh.close()
 # ---------------------------
 
@@ -708,12 +635,12 @@ hist += [('Total', len(sizes))]
 
 printTable(hist, file=sizedir+'%s peak size distribution Q%s.%s.txt'%(name,Qthresh,dirstr))
 
-if PLOTINCLUDE and PLOT:
+if PLOT:
 	plot.hist(sizes, bins=[0,5,10,25,50,75,100,125,150,175,200,225,250,275,300,350,400,450,500,1000,2000,5000,10000], file=sizedir+'%s peak size distribution freq Q%s.pdf'%(name, Qthresh), custom='set size ratio .3; set yrange [0:.4]', xlabel='Peak size (nt)', ylabel='Frequency', yfreq=1)#'; set yrange [0:%s]'%(rnge+.05*rnge))
 	
 	plot.hist(sizes, bins=[0,5,10,25,50,75,100,125,150,175,200,225,250,275,300,350,400,450,500,1000,2000,5000,10000], file=sizedir+'%s peak size distribution Q%s.pdf'%(name, Qthresh), custom='set size ratio .3; set yrange [0:*]', xlabel='Peak size (nt)', ylabel='Count', yfreq=0)#'; set yrange [0:%s]'%(rnge+.05*rnge))
 	
-	# rnge = ut.listRange(sizes)
+	# rnge = listRange(sizes)
 	plot.hist(sizes, bins=bins, file=sizedir+'%s peak size distribution Q%s.png'%(name,Qthresh), custom='set size ratio .3', xlabel='Peak size (nt)', ylabel='Count')#'; set yrange [0:%s]'%(rnge+.05*rnge))
 	# plot.hist(sizes, bins=[1,5,10,25,50,75,100,125,150,175,200,225,250,275,300], file=outdir+'Size distro %s.pdf'%(chrom))
 # ------------------------------------
@@ -779,17 +706,16 @@ if SPATIALPROFILE:
 	for chrom,mn,mx,GID in mbc[chrom]:
 		for i in range(mn,mx): truedat[i] = [i,1.2]
 	
-	if PLOTINCLUDE:
-		plot.scatter([truedat,ptmprofile], xlabel='Position', ylabel='Posterior probability', style='lines', file=outdir+'PP profile Q%s.pdf'%(Qthresh), showstats=0, legends=['True', 'Ptm'], lineWeights=[2,2], colors=[1,3], custom='set yrange [0:1.05]; set size ratio .25')
+	plot.scatter([truedat,ptmprofile], xlabel='Position', ylabel='Posterior probability', style='lines', file=outdir+'PP profile Q%s.pdf'%(Qthresh), showstats=0, legends=['True', 'Ptm'], lineWeights=[2,2], colors=[1,3], custom='set yrange [0:1.05]; set size ratio .25')
 	
-		for lw,hg in [(0,1000), (1000,2000), (5000,10000)]:
-			plot.scatter([truedat[lw:hg],ptmprofile[lw:hg]], xlabel='Position', ylabel='Posterior probability', style='lines', file=outdir+'PP profile Q%s %s,%s.pdf'%(Qthresh,lw,hg), showstats=0, legends=['True', 'Ptm'], lineWeights=[2,2], colors=[1,3], custom='set yrange [0:1.25]; set size ratio .25')
+	for lw,hg in [(0,1000), (1000,2000), (5000,10000)]:
+		plot.scatter([truedat[lw:hg],ptmprofile[lw:hg]], xlabel='Position', ylabel='Posterior probability', style='lines', file=outdir+'PP profile Q%s %s,%s.pdf'%(Qthresh,lw,hg), showstats=0, legends=['True', 'Ptm'], lineWeights=[2,2], colors=[1,3], custom='set yrange [0:1.25]; set size ratio .25')
 	
-		# plot.scatter([nucprofile,ptmprofile], xlabel='Position', ylabel='Posterior probability', style='lines', file=outdir+'PP profile.pdf', showstats=0, legends=['Nuc', 'Ptm'], lineWeights=[2,2], colors=[1,3], custom='set yrange [0:1.05]; set size ratio .25')
-		# sys.exit()
+	# plot.scatter([nucprofile,ptmprofile], xlabel='Position', ylabel='Posterior probability', style='lines', file=outdir+'PP profile.pdf', showstats=0, legends=['Nuc', 'Ptm'], lineWeights=[2,2], colors=[1,3], custom='set yrange [0:1.05]; set size ratio .25')
+	# sys.exit()
 
-		# plot.hist(metaQ, nbins=25, title='quality distribution')
-		# plot.hist(metaD, nbins=25, title='depth distribution')
+	# plot.hist(metaQ, nbins=25, title='quality distribution')
+	# plot.hist(metaD, nbins=25, title='depth distribution')
 
 	# for chrom in Dct.keys():
 		# Dct[chrom]['bounds'][1] = Dct[chrom]['bounds'][0]+len(Dct[chrom]['P'])
@@ -812,13 +738,12 @@ hist = histogram(sizes, bins=bins)
 hist += [('Total', len(sizes))]
 # io.printTable(hist, file=sizedir+'%s peak size distribution Q%s.txt'%(name,Qthresh))
 
-if PLOTINCLUDE:
-	plot.hist(sizes, bins=[0,5,10,25,50,75,100,125,150,175,200,225,250,275,300,350,400,450,500,1000,2000,5000,10000], file=sizedir+'%s peak size distribution freq Q%s.pdf'%(name, Qthresh), custom='set size ratio .3; set yrange [0:.4]', xlabel='Peak size (nt)', ylabel='Frequency', yfreq=1)#'; set yrange [0:%s]'%(rnge+.05*rnge))
-	plot.hist(sizes, bins=[0,5,10,25,50,75,100,125,150,175,200,225,250,275,300,350,400,450,500,1000,2000,5000,10000], file=sizedir+'%s peak size distribution Q%s.pdf'%(name, Qthresh), custom='set size ratio .3; set yrange [0:*]', xlabel='Peak size (nt)', ylabel='Count', yfreq=0)#'; set yrange [0:%s]'%(rnge+.05*rnge))
+plot.hist(sizes, bins=[0,5,10,25,50,75,100,125,150,175,200,225,250,275,300,350,400,450,500,1000,2000,5000,10000], file=sizedir+'%s peak size distribution freq Q%s.pdf'%(name, Qthresh), custom='set size ratio .3; set yrange [0:.4]', xlabel='Peak size (nt)', ylabel='Frequency', yfreq=1)#'; set yrange [0:%s]'%(rnge+.05*rnge))
+plot.hist(sizes, bins=[0,5,10,25,50,75,100,125,150,175,200,225,250,275,300,350,400,450,500,1000,2000,5000,10000], file=sizedir+'%s peak size distribution Q%s.pdf'%(name, Qthresh), custom='set size ratio .3; set yrange [0:*]', xlabel='Peak size (nt)', ylabel='Count', yfreq=0)#'; set yrange [0:%s]'%(rnge+.05*rnge))
 
-	# rnge = ut.listRange(sizes)
-	plot.hist(sizes, bins=bins, file=sizedir+'%s peak size distribution Q%s.png'%(name,Qthresh), custom='set size ratio .3', xlabel='Peak size (nt)', ylabel='Count')#'; set yrange [0:%s]'%(rnge+.05*rnge))
-	# plot.hist(sizes, bins=[1,5,10,25,50,75,100,125,150,175,200,225,250,275,300], file=outdir+'Size distro %s.pdf'%(chrom))
+# rnge = ut.listRange(sizes)
+plot.hist(sizes, bins=bins, file=sizedir+'%s peak size distribution Q%s.png'%(name,Qthresh), custom='set size ratio .3', xlabel='Peak size (nt)', ylabel='Count')#'; set yrange [0:%s]'%(rnge+.05*rnge))
+# plot.hist(sizes, bins=[1,5,10,25,50,75,100,125,150,175,200,225,250,275,300], file=outdir+'Size distro %s.pdf'%(chrom))
 
 
 
@@ -848,7 +773,7 @@ if DISTANCEHISTOGRAM:
 	bins = [0,5,10,20,30,40,50,75,100,150,200,250,300,400,500,1000,1500,2000,2500,5000,10000,100000,1000000]
 	printList(ds,file=outdir+method+' distances.txt')
 	# plot.hist(ds,bins=bins,file=outdir+method+' distance distro.pdf')
-	if PLOTINCLUDE: plot.hist(ds,bins=bins,file=outdir+method+' distance distro.pdf', logscale='')
+	plot.hist(ds,bins=bins,file=outdir+method+' distance distro.pdf', logscale='')
 
 # set up d as a dictionary keyed by scaffold: d is the bedfile contents / the peaks
 ddct = dict([(d[i][0],[]) for i in range(len(d))])
@@ -937,9 +862,10 @@ for chromy in sorted(mbc.keys()):
 # print 'Within %s (%s), Without %s (%s), Total %s'%(within, within/float(total), without, without/float(total), total)
 
 thebins = [0,5,10,15,20,25,30,35,40,45,50,60,70,80,90,100,125,150,175,200,300,400,500,600,700,800,900,1000,2500,5000,10000,20000]
+plot.hist(minds, bins=thebins, file=outdir+method+' mindist Q%s.pdf'%(Qthresh), custom='set size ratio .25; set yrange [*:*]', xlabel='Distance to true binding center')
 printTable(histogram(minds, bins=thebins), file=outdir+method+' mindist hist.txt')
-if PLOTINCLUDE: plot.hist(minds, bins=thebins, file=outdir+method+' mindist Q%s.pdf'%(Qthresh), custom='set size ratio .25; set yrange [*:*]', xlabel='Distance to true binding center')
 
+# print outdir
 
 fh = None
 if method == 'glimmr':
@@ -990,9 +916,8 @@ if SPATIALPROFILE:
 		# print 'Correlation of true vs prediction PTM maps: s=%s'%(ut.cor(true,pred, method='spearman'))
 		# print 'Correlation of true vs prediction PTM maps: r=%s, s=%s'%(ut.cor(true,pred, method='pearson'), ut.cor(true,pred, method='spearman'))
 		
-		if PLOTINCLUDE:
-			for lw,hg in [(0,1000), (1000,2000), (5000,10000)]:
-				plot.scatter([truedat[lw:hg],predat[lw:hg]], style='lines', file=outdir+'True vs predicted plot Q%s %s,%s,%s.pdf'%(Qthresh,chromy,lw,hg), xlabel='Position', ylabel='Binding', custom='set yrange [0:1.05]; set size ratio .25', lw=2, showstats=0, legends=['True', 'Pred'])
+		for lw,hg in [(0,1000), (1000,2000), (5000,10000)]:
+			plot.scatter([truedat[lw:hg],predat[lw:hg]], style='lines', file=outdir+'True vs predicted plot Q%s %s,%s,%s.pdf'%(Qthresh,chromy,lw,hg), xlabel='Position', ylabel='Binding', custom='set yrange [0:1.05]; set size ratio .25', lw=2, showstats=0, legends=['True', 'Pred'])
 		
-			plot.scatter([truedat,predat], style='lines', file=outdir+'True vs predicted plot Q%s %s.pdf'%(Qthresh,chromy), xlabel='Position', ylabel='Binding', custom='set yrange [0:1.05]; set size ratio .25', lw=2, showstats=0, legends=['True', 'Pred'])
+		plot.scatter([truedat,predat], style='lines', file=outdir+'True vs predicted plot Q%s %s.pdf'%(Qthresh,chromy), xlabel='Position', ylabel='Binding', custom='set yrange [0:1.05]; set size ratio .25', lw=2, showstats=0, legends=['True', 'Pred'])
 		
