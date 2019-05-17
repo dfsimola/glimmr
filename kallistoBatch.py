@@ -3,7 +3,7 @@
 import os, re, sys, math, time, stat, time, random, subprocess, decimal, glob
 import glimmrAccessories as ga
 
-VERSION = "1.25"
+VERSION = "1.3"
 
 help = """Usage: %s [options]
 version %s
@@ -16,6 +16,7 @@ Created: 16 May 2018
 
 
 Version history:
+v1.3  - added CLI parms for fragment length and sd
 v1.25 - various small bug fixes
 v1.2  - removed --kalisto-format flag; by default will save TPM, count, and FPKM matrices
 v1.1: - changed default from outer join to simple concatenation which assumes input samples were processed using same index (--outerjoin to enable)
@@ -142,6 +143,8 @@ Additional flags:
                                       # e.g. --mapfastq fastqR1,fastqR2
                                       # assumes mapfile provided via --map as source of fastq files
 --gcbias                              # GC bias flag
+--fraglen                             # fragment length mean (default: 250)
+--fragsd                              # fragment length SD (default: 50)
 --petokens <_R1,_R2>                  # string pattern to match PE fastq files (default '_R1,_R2')
 --annotation <path/to/gene.ann/       # path to gene to name annotation file
 --custom <STRING>                     # any custom flags provided to kallisto
@@ -178,6 +181,9 @@ while ai < len(args):
 	# elif arg == 'kallisto-format': KAL_format = val # 'TPM' or 'FPKM' or 'count'
 	elif arg == 'kallisto-length': KAL_length = val # 'length' or 'eff_length'
 	elif arg == 'gcbias': KAL_GCBIAS = True; ai-=1
+	elif arg == 'fraglen': KAL_FRAGLEN = int(val)
+	elif arg == 'fragsd': KAL_FRAGSD = int(val)
+	
 	elif arg == 'testaccess': TEST_FOR_ACCESS = True; ai-=1
 	
 	elif arg == 'annotation': ensgtfile = val
@@ -550,3 +556,11 @@ del tab_df
 pipeit('- Finished merging kallisto files.',1)
 
 pipeit('DONE. EXITING.',1)
+
+
+
+
+def main():
+	pass
+
+if __name__ == "__main__": main()
