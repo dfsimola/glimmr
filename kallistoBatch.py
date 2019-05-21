@@ -48,6 +48,7 @@ ensgtfile = 'ENSEMBL.transcript.annotation.GRCh38.p10.txt'
 KAL_INDEX = 'GRCh38.kallisto.index'
 KAL_PATH = 'kallisto_linux-v0.44.0/kallisto'
 
+FLIPG2T = False
 
 KAL_BOOTSTRAPS = 0
 KAL_SINGLEEND = '--single'
@@ -150,6 +151,7 @@ Additional flags:
 --custom <STRING>                     # any custom flags provided to kallisto
 --merge                               # skip alignment+quant, even if there are files that have not been processed
 --outer_join                          # perform full outer join (needed if combining samples from different reference indices)
+--flipannotation
 
 Note, you can specify a subset of fastq files in a directory using wild card, e.g. -i "/path/to/dir/HYF3M_DS59787A_TCCGCGAA-AGGCTATA_L001_R*"
 
@@ -187,6 +189,7 @@ while ai < len(args):
 	elif arg == 'testaccess': TEST_FOR_ACCESS = True; ai-=1
 	
 	elif arg == 'annotation': ensgtfile = val
+	elif arg == 'flipannotation'; FLIPG2T = True; ai-=1
 
 	elif arg == 'map' or arg == 'metadata': mapfile = val
 	elif arg == 'mapkey' or arg == 'key' or arg == 'samplekey': mapkey = val
@@ -351,10 +354,14 @@ try:
 	d,r,c = ga.readTable(ensgtfile,rownames=0)
 	for row in d:
 		# print 'loading %s - %s'%(row[0], row[1])
-		enst2g[row[1]] = row[0]
+		if FLIPG2T:
+			enst2g[row[0]] = row[1]
+		else:
+			enst2g[row[1]] = row[0]
+		
 		# enst2len[row[1]] = int(row[2])
 	pipeit('done.',1)
-	pipeit('Note, expected format is geneid\ttranscriptid',1)
+	pipeit('Note, expected format is geneid\ttranscriptid. Use -flipg2t to reverse',1)
 except IOError:
 	pipeit('WARNING: Cannot access -annotation file, i.e. the gene-transcript annotation file.', 1)
 
