@@ -189,7 +189,7 @@ while ai < len(args):
 	elif arg == 'testaccess': TEST_FOR_ACCESS = True; ai-=1
 	
 	elif arg == 'annotation': ensgtfile = val
-	elif arg == 'flipannotation'; FLIPG2T = True; ai-=1
+	elif arg == 'flipannotation': FLIPG2T = True; ai-=1
 
 	elif arg == 'map' or arg == 'metadata': mapfile = val
 	elif arg == 'mapkey' or arg == 'key' or arg == 'samplekey': mapkey = val
