@@ -404,7 +404,7 @@ print
 
 # merge FPKM columns into single matrix
 labels = []
-tab_df = []
+# tab_df = []
 
 pairs = {}
 pairs['count'] = []
@@ -415,6 +415,12 @@ pairs['FPKM'] = []
 # mat = [[ga.nastr for l in labels] for g in genes]
 
 genetab = []
+
+tabname = outdir+'%s.%s.table.txt'%(fname,'transcript')
+fhtab = open(tabname, 'w')
+ga.printList(['SampleID','Label','Gene','Transcript','Info','TPM','Count','Length','Eff_length'], delim='\t', pipe=fhtab)
+# ga.printTable(tab_df,,file=tabname)
+
 
 # alignment stats - parsing json file
 infodct = {}
@@ -437,12 +443,15 @@ for tmpdir in kaldirs:
 		
 		idx = c.index('tpm')
 		pairs['TPM'] += [[(row[0], row[idx]) for row in d]]
-		pairs['FPKM'] = [(row[0], ga.divna(ga.multna(1000,row[idx]),row[lenidx])) for row in d]
+		pairs['FPKM'] = [ (row[0], ga.divna(ga.multna(1000,row[idx]),row[lenidx])) for row in d]
 		
 		idx = c.index('est_counts')
 		pairs['count'] += [[(row[0], row[idx]) for row in d]]
 		
-		tab_df += [[malab, N2S[malab]]+[row[0].split('|')[0] in enst2g and enst2g[row[0].split('|')[0]] or "NA", row[0].split('|')[0], row[0], row[c.index('tpm')], row[c.index('est_counts')]] for row in d]
+		pairs[]
+		
+		# tab_df += [[malab, N2S[malab]]+[row[0].split('|')[0] in enst2g and enst2g[row[0].split('|')[0]] or "NA", row[0].split('|')[0], row[0], row[c.index('tpm')], row[c.index('est_counts')], row[c.index('length')], row[c.index('eff_length')]] for row in d]
+		ga.printTable([[malab, N2S[malab]]+[row[0].split('|')[0] in enst2g and enst2g[row[0].split('|')[0]] or "NA", row[0].split('|')[0], row[0], row[c.index('tpm')], row[c.index('est_counts')], row[c.index('length')], row[c.index('eff_length')]] for row in d], pipe=fhtab)
 		
 		# if KAL_format == 'TPM':
 		# 	idx = c.index('tpm')
@@ -555,11 +564,12 @@ for KAL_format in ['TPM', 'count']:#, 'FPKM']:
 
 # should also save data frames for this....
 # incorporate map file into data frame
-pipeit('- Saving data as data frame...',1)
-tabname = outdir+'%s.%s.table.txt'%(fname,'transcript')
-ga.printTable(tab_df,['SampleID','Label','Gene','Transcript','Info','TPM','Count'],file=tabname)
+# pipeit('- Saving data as data frame...',1)
+# tabname = outdir+'%s.%s.table.txt'%(fname,'transcript')
+fhtab.close()
+# ga.printTable(tab_df,['SampleID','Label','Gene','Transcript','Info','TPM','Count'],file=tabname)
 pipeit('- Saved %s'%(tabname),1)
-del tab_df
+# del tab_df
 pipeit('- Finished merging kallisto files.',1)
 
 pipeit('DONE. EXITING.',1)
