@@ -448,8 +448,6 @@ for tmpdir in kaldirs:
 		idx = c.index('est_counts')
 		pairs['count'] += [[(row[0], row[idx]) for row in d]]
 		
-		pairs[]
-		
 		# tab_df += [[malab, N2S[malab]]+[row[0].split('|')[0] in enst2g and enst2g[row[0].split('|')[0]] or "NA", row[0].split('|')[0], row[0], row[c.index('tpm')], row[c.index('est_counts')], row[c.index('length')], row[c.index('eff_length')]] for row in d]
 		ga.printTable([[malab, N2S[malab]]+[row[0].split('|')[0] in enst2g and enst2g[row[0].split('|')[0]] or "NA", row[0].split('|')[0], row[0], row[c.index('tpm')], row[c.index('est_counts')], row[c.index('length')], row[c.index('eff_length')]] for row in d], pipe=fhtab)
 		
